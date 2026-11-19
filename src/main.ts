@@ -2,6 +2,7 @@ import OBR, {
   buildEffect,
   isImage,
   type Effect,
+  type Image,
   type Matrix,
   type Uniform,
 } from "@owlbear-rodeo/sdk";
@@ -9,6 +10,7 @@ import OBR, {
 const EXTENSION_ID = "com.custom.goo-aura";
 const META_KEY = `${EXTENSION_ID}/enabled`;
 const COLOR_META_KEY = `${EXTENSION_ID}/color`; // Stores "#rrggbbaa"
+const RADIUS_META_KEY = `${EXTENSION_ID}/radius`; // Stores base radius in grid squares
 const GROUP_META_KEY = `${EXTENSION_ID}/group`;
 const KEEP_WHEN_HIDDEN_META_KEY = `${EXTENSION_ID}/keep-when-hidden`;
 const EFFECT_META_KEY = `${EXTENSION_ID}/is-goo-effect`;
@@ -19,18 +21,19 @@ const HIDDEN_BEHAVIOR_MENU_ID = `${EXTENSION_ID}/toggle-hidden-behavior`;
 const CUSTOM_COLORS_STORAGE_KEY = `${EXTENSION_ID}/custom-colors`;
 const BUILTIN_OPACITIES_STORAGE_KEY = `${EXTENSION_ID}/builtin-opacities`;
 const DEFAULT_COLOR_STORAGE_KEY = `${EXTENSION_ID}/default-rgba`;
+const DEFAULT_RADIUS_STORAGE_KEY = `${EXTENSION_ID}/default-radius`;
 const GROUPS_STORAGE_KEY = `${EXTENSION_ID}/groups`;
 const ACTIVE_TARGET_STORAGE_KEY = `${EXTENSION_ID}/active-target`;
 
-const NUM_MATRICES = 14; // 14 matrices × 3 monsters per matrix = 42 monsters max
-const MAX_TOKENS = NUM_MATRICES * 3;
+const NUM_MATRICES = 20; // 20 matrices × 2 monsters per matrix = 40 monsters max
+const MAX_TOKENS = NUM_MATRICES * 2;
 const NUM_PALETTE_MATRICES = 6; // 6 matrices × 2 RGBA colors = 12 simultaneous colors
 const MAX_ACTIVE_PALETTE = NUM_PALETTE_MATRICES * 2;
 
-// Tweak these to adjust aura radius and liquid merge stretch
-const AURA_RADIUS_MULTIPLIER = 1.25; // Radius in grid squares
-const SMOOTHNESS_MULTIPLIER = 0.7;   // How far apart blobs stretch to merge
-const DEFAULT_OPACITY = 0.42;        // Starting opacity (42%)
+const DEFAULT_RADIUS_MULTIPLIER = 1.25; // Default base radius in grid squares
+const MIN_RADIUS_MULTIPLIER = 0.5;
+const MAX_RADIUS_MULTIPLIER = 4.0;
+const DEFAULT_OPACITY = 0.42; // Starting opacity (42%)
 
 interface SavedGooColor {
   id: string;
@@ -43,7 +46,8 @@ interface SavedGooColor {
 interface SavedGooGroup {
   id: string;
   name: string;
-  rgbaHex: string; // "#rrggbbaa"
+  rgbaHex: string;          // "#rrggbbaa"
+  radiusMultiplier: number; // Base radius in grid squares
   keepWhenHidden?: boolean;
   builtIn?: boolean;
 }
@@ -55,10 +59,10 @@ const STARTING_COLORS: SavedGooColor[] = [
 ];
 
 const STARTING_GROUPS: SavedGooGroup[] = [
-  { id: "group-1", name: "Group 1", rgbaHex: "#2ed9596b", keepWhenHidden: false, builtIn: true },
-  { id: "group-2", name: "Group 2", rgbaHex: "#ef44446b", keepWhenHidden: false, builtIn: true },
-  { id: "group-3", name: "Group 3", rgbaHex: "#a855f76b", keepWhenHidden: false, builtIn: true },
-  { id: "group-4", name: "Group 4", rgbaHex: "#06b6d46b", keepWhenHidden: false, builtIn: true },
+  { id: "group-1", name: "Group 1", rgbaHex: "#2ed9596b", radiusMultiplier: DEFAULT_RADIUS_MULTIPLIER, keepWhenHidden: false, builtIn: true },
+  { id: "group-2", name: "Group 2", rgbaHex: "#ef44446b", radiusMultiplier: DEFAULT_RADIUS_MULTIPLIER, keepWhenHidden: false, builtIn: true },
+  { id: "group-3", name: "Group 3", rgbaHex: "#a855f76b", radiusMultiplier: DEFAULT_RADIUS_MULTIPLIER, keepWhenHidden: false, builtIn: true },
+  { id: "group-4", name: "Group 4", rgbaHex: "#06b6d46b", radiusMultiplier: DEFAULT_RADIUS_MULTIPLIER, keepWhenHidden: false, builtIn: true },
 ];
 
 const matrixUniforms = Array.from(
@@ -71,15 +75,19 @@ const paletteUniforms = Array.from(
   (_, p) => `uniform float3x3 uPal${p};`
 ).join("\n");
 
-// Each row of a 3x3 matrix stores one monster: [x, y, paletteIndex]
-const slotDefs: { pos: string; col: string }[] = [];
+// Each 3x3 matrix packs 2 monsters across its first 8 floats: [x, y, paletteIndex, radius]
+const slotDefs: { pos: string; col: string; rad: string }[] = [];
 for (let m = 0; m < NUM_MATRICES; m++) {
-  for (let r = 0; r < 3; r++) {
-    slotDefs.push({
-      pos: `float2(uM${m}[${r}][0], uM${m}[${r}][1])`,
-      col: `uM${m}[${r}][2]`,
-    });
-  }
+  slotDefs.push({
+    pos: `float2(uM${m}[0][0], uM${m}[0][1])`,
+    col: `uM${m}[0][2]`,
+    rad: `uM${m}[1][0]`,
+  });
+  slotDefs.push({
+    pos: `float2(uM${m}[1][1], uM${m}[1][2])`,
+    col: `uM${m}[2][0]`,
+    rad: `uM${m}[2][1]`,
+  });
 }
 
 const mergeSteps = slotDefs
@@ -87,11 +95,14 @@ const mergeSteps = slotDefs
   .map(
     (slot, i) => `
     if (uCount > ${i + 1.5}) {
-        float di = length(coord - ${slot.pos}) - uRadius;
+        float ri = ${slot.rad};
+        float di = length(coord - ${slot.pos}) - ri;
         half4 ci = getPaletteColor(${slot.col});
-        float h = clamp(0.5 + 0.5 * (di - d) / uSmoothness, 0.0, 1.0);
-        d = mix(di, d, h) - uSmoothness * h * (1.0 - h);
+        float k = max(min(curRad, ri) * 0.65, 1.0);
+        float h = clamp(0.5 + 0.5 * (di - d) / k, 0.0, 1.0);
+        d = mix(di, d, h) - k * h * (1.0 - h);
         col = mix(ci, col, half(h));
+        curRad = mix(ri, curRad, h);
     }`
   )
   .join("\n");
@@ -121,8 +132,6 @@ ${matrixUniforms}
 ${paletteUniforms}
 
 uniform float uCount;
-uniform float uRadius;
-uniform float uSmoothness;
 
 half4 getPaletteColor(float idx) {
 ${paletteLookupLines.join("\n")}
@@ -133,7 +142,8 @@ half4 main(float2 coord) {
         return half4(0.0);
     }
 
-    float d = length(coord - ${slotDefs[0].pos}) - uRadius;
+    float curRad = ${slotDefs[0].rad};
+    float d = length(coord - ${slotDefs[0].pos}) - curRad;
     half4 col = getPaletteColor(${slotDefs[0].col});
 ${mergeSteps}
 
@@ -148,6 +158,37 @@ ${mergeSteps}
 
 function clampOpacity(val: number): number {
   return Math.min(1, Math.max(0, val));
+}
+
+function clampRadiusMultiplier(val: number): number {
+  if (!Number.isFinite(val)) return DEFAULT_RADIUS_MULTIPLIER;
+  return Math.min(MAX_RADIUS_MULTIPLIER, Math.max(MIN_RADIUS_MULTIPLIER, val));
+}
+
+// Calculates how many grid cells wide/tall a token is (1.0 for 1x1, 2.0 for 2x2, etc.)
+function getTokenGridSizeMultiplier(item: Image): number {
+  const scaleX = Math.abs(item.scale?.x ?? 1) || 1;
+  const scaleY = Math.abs(item.scale?.y ?? 1) || 1;
+
+  const imgW = item.image?.width;
+  const imgH = item.image?.height;
+  const itemDpi = item.grid?.dpi;
+
+  if (
+    typeof imgW === "number" &&
+    typeof imgH === "number" &&
+    typeof itemDpi === "number" &&
+    imgW > 0 &&
+    imgH > 0 &&
+    itemDpi > 0
+  ) {
+    const cellsW = (imgW / itemDpi) * scaleX;
+    const cellsH = (imgH / itemDpi) * scaleY;
+    const avgCells = (cellsW + cellsH) / 2;
+    return Math.min(10, Math.max(0.25, avgCells));
+  }
+
+  return Math.min(10, Math.max(0.25, Math.max(scaleX, scaleY)));
 }
 
 function normalizeRgbHex(input: string): string | null {
@@ -283,7 +324,6 @@ function getSavedGroups(): SavedGooGroup[] {
     const valid: SavedGooGroup[] = [];
     for (const g of parsed) {
       if (!g || typeof g.id !== "string" || typeof g.name !== "string") continue;
-      // Support both new `rgbaHex` and legacy `hex` properties
       const rawColor = typeof g.rgbaHex === "string" ? g.rgbaHex : g.hex;
       if (typeof rawColor !== "string") continue;
       const { hex, opacity } = parseRgbaHex(rawColor);
@@ -291,6 +331,10 @@ function getSavedGroups(): SavedGooGroup[] {
         id: g.id,
         name: g.name,
         rgbaHex: formatRgbaHex(hex, opacity),
+        radiusMultiplier:
+          typeof g.radiusMultiplier === "number"
+            ? clampRadiusMultiplier(g.radiusMultiplier)
+            : DEFAULT_RADIUS_MULTIPLIER,
         keepWhenHidden: Boolean(g.keepWhenHidden),
         builtIn: Boolean(g.builtIn),
       });
@@ -314,6 +358,19 @@ function getDefaultRgbaHex(): string {
 function setDefaultRgbaHex(rgbaHex: string) {
   const { hex, opacity } = parseRgbaHex(rgbaHex);
   localStorage.setItem(DEFAULT_COLOR_STORAGE_KEY, formatRgbaHex(hex, opacity));
+}
+
+function getDefaultRadiusMultiplier(): number {
+  const raw = localStorage.getItem(DEFAULT_RADIUS_STORAGE_KEY);
+  if (raw === null) return DEFAULT_RADIUS_MULTIPLIER;
+  return clampRadiusMultiplier(Number(raw));
+}
+
+function setDefaultRadiusMultiplier(mult: number) {
+  localStorage.setItem(
+    DEFAULT_RADIUS_STORAGE_KEY,
+    String(clampRadiusMultiplier(mult))
+  );
 }
 
 function getStoredActiveTarget(): string {
@@ -345,13 +402,9 @@ async function syncGooEffect() {
       OBR.scene.grid.getDpi(),
     ]);
 
-    const radius = dpi * AURA_RADIUS_MULTIPLIER;
-    const smoothness = dpi * SMOOTHNESS_MULTIPLIER;
-    const padding = radius + smoothness * 1.5;
-
-    // Collect positions & RGBA hex colors of visible goo tokens
+    // Collect positions, RGBA hex colors, and size-scaled radii of up to 40 tokens
     const activeRgbaHexes: string[] = [];
-    const tokens: { x: number; y: number; colorIdx: number }[] = [];
+    const tokens: { x: number; y: number; colorIdx: number; radius: number }[] = [];
 
     for (const item of items) {
       if (isImage(item) && item.metadata[META_KEY]) {
@@ -373,7 +426,21 @@ async function syncGooEffect() {
           }
         }
 
-        tokens.push({ x: item.position.x, y: item.position.y, colorIdx });
+        const rawRadiusMult = item.metadata[RADIUS_META_KEY];
+        const baseRadiusMult =
+          typeof rawRadiusMult === "number"
+            ? clampRadiusMultiplier(rawRadiusMult)
+            : DEFAULT_RADIUS_MULTIPLIER;
+
+        const tokenSizeScale = getTokenGridSizeMultiplier(item);
+        const pixelRadius = dpi * baseRadiusMult * tokenSizeScale;
+
+        tokens.push({
+          x: item.position.x,
+          y: item.position.y,
+          colorIdx,
+          radius: pixelRadius,
+        });
         if (tokens.length >= MAX_TOKENS) break;
       }
     }
@@ -389,32 +456,24 @@ async function syncGooEffect() {
       return;
     }
 
-    // Calculate bounding box around all rendered goo tokens
+    // Calculate dynamic bounding box accounting for each token's scaled radius + liquid bridge stretch
     let minX = Infinity;
     let minY = Infinity;
     let maxX = -Infinity;
     let maxY = -Infinity;
 
     for (const t of tokens) {
-      if (t.x < minX) minX = t.x;
-      if (t.y < minY) minY = t.y;
-      if (t.x > maxX) maxX = t.x;
-      if (t.y > maxY) maxY = t.y;
+      const pad = t.radius * 1.75 + 4;
+      if (t.x - pad < minX) minX = t.x - pad;
+      if (t.y - pad < minY) minY = t.y - pad;
+      if (t.x + pad > maxX) maxX = t.x + pad;
+      if (t.y + pad > maxY) maxY = t.y + pad;
     }
-
-    minX -= padding;
-    minY -= padding;
-    maxX += padding;
-    maxY += padding;
 
     const width = Math.max(maxX - minX, 1);
     const height = Math.max(maxY - minY, 1);
 
-    const uniforms: Uniform[] = [
-      { name: "uCount", value: tokens.length },
-      { name: "uRadius", value: radius },
-      { name: "uSmoothness", value: smoothness },
-    ];
+    const uniforms: Uniform[] = [{ name: "uCount", value: tokens.length }];
 
     // Pack up to 12 active RGBA colors into 6 float3x3 palette matrices (2 RGBA per matrix)
     const fallbackRgba = STARTING_GROUPS[0].rgbaHex;
@@ -425,16 +484,21 @@ async function syncGooEffect() {
       uniforms.push({ name: `uPal${p}`, value: palMat });
     }
 
-    // Pack 3 monsters per 9-element Matrix: [x, y, paletteIndex]
+    // Pack 2 monsters per 9-element Matrix: [x, y, paletteIndex, radius] × 2 + [0]
     for (let m = 0; m < NUM_MATRICES; m++) {
-      const t0 = tokens[m * 3 + 0];
-      const t1 = tokens[m * 3 + 1];
-      const t2 = tokens[m * 3 + 2];
+      const t0 = tokens[m * 2 + 0];
+      const t1 = tokens[m * 2 + 1];
 
       const mat: Matrix = [
-        t0 ? t0.x - minX : 0, t0 ? t0.y - minY : 0, t0 ? t0.colorIdx : 0,
-        t1 ? t1.x - minX : 0, t1 ? t1.y - minY : 0, t1 ? t1.colorIdx : 0,
-        t2 ? t2.x - minX : 0, t2 ? t2.y - minY : 0, t2 ? t2.colorIdx : 0,
+        t0 ? t0.x - minX : 0,
+        t0 ? t0.y - minY : 0,
+        t0 ? t0.colorIdx : 0,
+        t0 ? t0.radius : 0,
+        t1 ? t1.x - minX : 0,
+        t1 ? t1.y - minY : 0,
+        t1 ? t1.colorIdx : 0,
+        t1 ? t1.radius : 0,
+        0,
       ];
 
       uniforms.push({ name: `uM${m}`, value: mat });
@@ -514,6 +578,8 @@ async function syncContextMenuForRole(role: "GM" | "PLAYER") {
           (item) => !item.metadata[META_KEY]
         );
         const defaultRgba = getDefaultRgbaHex();
+        const defaultRadius = getDefaultRadiusMultiplier();
+
         await OBR.scene.items.updateItems(context.items, (items) => {
           for (const item of items) {
             if (shouldEnable) {
@@ -521,9 +587,13 @@ async function syncContextMenuForRole(role: "GM" | "PLAYER") {
               if (typeof item.metadata[COLOR_META_KEY] !== "string") {
                 item.metadata[COLOR_META_KEY] = defaultRgba;
               }
+              if (typeof item.metadata[RADIUS_META_KEY] !== "number") {
+                item.metadata[RADIUS_META_KEY] = defaultRadius;
+              }
             } else {
               delete item.metadata[META_KEY];
               delete item.metadata[COLOR_META_KEY];
+              delete item.metadata[RADIUS_META_KEY];
               delete item.metadata[KEEP_WHEN_HIDDEN_META_KEY];
             }
           }
@@ -635,7 +705,7 @@ async function renderPopoverUI() {
       background: #141519;
       border-color: #3b82f6;
     }
-    .goo-opacity-slider {
+    .goo-slider {
       -webkit-appearance: none;
       appearance: none;
       width: 100%;
@@ -645,7 +715,7 @@ async function renderPopoverUI() {
       outline: none;
       cursor: pointer;
     }
-    .goo-opacity-slider::-webkit-slider-thumb {
+    .goo-slider::-webkit-slider-thumb {
       -webkit-appearance: none;
       appearance: none;
       width: 13px;
@@ -655,7 +725,7 @@ async function renderPopoverUI() {
       border: 2px solid #ffffff;
       cursor: pointer;
     }
-    .goo-opacity-slider::-moz-range-thumb {
+    .goo-slider::-moz-range-thumb {
       width: 13px;
       height: 13px;
       border-radius: 50%;
@@ -713,6 +783,8 @@ async function renderPopoverUI() {
     let groupCounts: Record<string, number> = {};
     let selectedCount = 0;
     let selectionKeepWhenHidden = false;
+    let selectionRadiusMultiplier = getDefaultRadiusMultiplier();
+    let isDraggingRadius = false;
 
     // Header
     const headerRow = document.createElement("div");
@@ -765,7 +837,7 @@ async function renderPopoverUI() {
     groupList.style.display = "flex";
     groupList.style.flexDirection = "column";
     groupList.style.gap = "5px";
-    groupList.style.maxHeight = "140px";
+    groupList.style.maxHeight = "136px";
     groupList.style.overflowY = "auto";
     groupList.style.overflowX = "hidden";
     groupList.style.padding = "1px";
@@ -787,7 +859,7 @@ async function renderPopoverUI() {
     colorList.style.flexDirection = "column";
     colorList.style.gap = "5px";
     colorList.style.flex = "1";
-    colorList.style.minHeight = "64px";
+    colorList.style.minHeight = "62px";
     colorList.style.overflowY = "auto";
     colorList.style.overflowX = "hidden";
     colorList.style.padding = "2px";
@@ -830,7 +902,7 @@ async function renderPopoverUI() {
 
     const opacitySlider = document.createElement("input");
     opacitySlider.type = "range";
-    opacitySlider.className = "goo-opacity-slider";
+    opacitySlider.className = "goo-slider";
     opacitySlider.min = "0";
     opacitySlider.max = "100";
     opacitySlider.step = "1";
@@ -883,7 +955,6 @@ async function renderPopoverUI() {
     hexInput.style.fontFamily = "monospace";
     hexInput.style.outline = "none";
 
-    // Detach from existing saved color when typing a new name or picking a new hex
     nameInput.addEventListener("input", () => {
       if (nameInput.value.trim().length > 0) {
         editingColorId = null;
@@ -922,6 +993,44 @@ async function renderPopoverUI() {
 
     hexRow.append(pickerInput, hexInput, saveBtn);
     customSection.append(opacityRow, nameInput, hexRow);
+
+    // --- TARGET AURA RADIUS SLIDER ---
+    const radiusRow = document.createElement("div");
+    radiusRow.style.display = "flex";
+    radiusRow.style.flexDirection = "column";
+    radiusRow.style.gap = "4px";
+    radiusRow.style.padding = "5px 8px";
+    radiusRow.style.marginBottom = "6px";
+    radiusRow.style.borderRadius = "6px";
+    radiusRow.style.background = "#141519";
+    radiusRow.style.border = "1px solid #2e3038";
+
+    const radiusTopRow = document.createElement("div");
+    radiusTopRow.style.display = "flex";
+    radiusTopRow.style.justifyContent = "space-between";
+    radiusTopRow.style.alignItems = "center";
+
+    const radiusLabel = document.createElement("span");
+    radiusLabel.style.fontSize = "11px";
+    radiusLabel.style.color = "#d1d5db";
+    radiusLabel.textContent = "Aura Radius (Size-Scaled)";
+
+    const radiusValueTag = document.createElement("span");
+    radiusValueTag.style.fontSize = "11px";
+    radiusValueTag.style.fontFamily = "monospace";
+    radiusValueTag.style.color = "#93c5fd";
+    radiusValueTag.textContent = `${selectionRadiusMultiplier.toFixed(2)} sq`;
+
+    const radiusSlider = document.createElement("input");
+    radiusSlider.type = "range";
+    radiusSlider.className = "goo-slider";
+    radiusSlider.min = String(MIN_RADIUS_MULTIPLIER);
+    radiusSlider.max = String(MAX_RADIUS_MULTIPLIER);
+    radiusSlider.step = "0.05";
+    radiusSlider.value = String(selectionRadiusMultiplier);
+
+    radiusTopRow.append(radiusLabel, radiusValueTag);
+    radiusRow.append(radiusTopRow, radiusSlider);
 
     // --- HIDDEN TOKEN VISIBILITY TOGGLE ---
     const hiddenToggleRow = document.createElement("label");
@@ -976,12 +1085,21 @@ async function renderPopoverUI() {
         removeBtn.textContent = "Remove Goo from Selected";
         colorSectionLabel.textContent = "Apply Color to Selected Tokens";
         hiddenCheckbox.checked = selectionKeepWhenHidden;
+        if (!isDraggingRadius) {
+          radiusSlider.value = String(selectionRadiusMultiplier);
+          radiusValueTag.textContent = `${selectionRadiusMultiplier.toFixed(2)} sq`;
+        }
       } else {
         const grp = getSavedGroups().find((g) => g.id === activeTarget);
         const label = grp ? grp.name : "Group";
+        const rad = grp?.radiusMultiplier ?? DEFAULT_RADIUS_MULTIPLIER;
         removeBtn.textContent = `Turn Off Goo for "${label}"`;
         colorSectionLabel.textContent = `Apply Color to "${label}"`;
         hiddenCheckbox.checked = Boolean(grp?.keepWhenHidden);
+        if (!isDraggingRadius) {
+          radiusSlider.value = String(rad);
+          radiusValueTag.textContent = `${rad.toFixed(2)} sq`;
+        }
       }
     }
 
@@ -995,6 +1113,7 @@ async function renderPopoverUI() {
           const parsed = parseRgbaHex(grp.rgbaHex);
           syncEditorInputs(parsed.hex, parsed.opacity);
           setDefaultRgbaHex(grp.rgbaHex);
+          setDefaultRadiusMultiplier(grp.radiusMultiplier);
           const matchingPreset = getSavedColors().find(
             (c) =>
               c.hex === parsed.hex &&
@@ -1008,6 +1127,83 @@ async function renderPopoverUI() {
       updateGroupRowHighlights();
       rebuildSwatches();
     }
+
+    // Live Radius Slider
+    let lastRadiusPush = 0;
+    let radiusTimer: number | undefined;
+
+    async function commitRadiusChange(mult: number) {
+      if ((await OBR.player.getRole()) !== "GM") return;
+      const clamped = clampRadiusMultiplier(mult);
+      setDefaultRadiusMultiplier(clamped);
+
+      if (activeTarget === "selection") {
+        selectionRadiusMultiplier = clamped;
+        const selection = await OBR.player.getSelection();
+        if (!selection || selection.length === 0) return;
+
+        await OBR.scene.items.updateItems(selection, (items) => {
+          for (const item of items) {
+            if (isImage(item) && item.layer === "CHARACTER") {
+              item.metadata[RADIUS_META_KEY] = clamped;
+            }
+          }
+        });
+      } else {
+        const groups = getSavedGroups();
+        const targetGroup = groups.find((g) => g.id === activeTarget);
+        if (targetGroup) {
+          targetGroup.radiusMultiplier = clamped;
+          saveGroups(groups);
+        }
+
+        const allItems = await OBR.scene.items.getItems();
+        const groupTokenIds = allItems
+          .filter(
+            (item) =>
+              isImage(item) && item.metadata[GROUP_META_KEY] === activeTarget
+          )
+          .map((item) => item.id);
+
+        if (groupTokenIds.length > 0) {
+          await OBR.scene.items.updateItems(groupTokenIds, (items) => {
+            for (const item of items) {
+              item.metadata[RADIUS_META_KEY] = clamped;
+            }
+          });
+        }
+      }
+    }
+
+    radiusSlider.addEventListener("pointerdown", () => {
+      isDraggingRadius = true;
+    });
+    window.addEventListener("pointerup", () => {
+      isDraggingRadius = false;
+    });
+
+    radiusSlider.addEventListener("input", () => {
+      const val = clampRadiusMultiplier(Number(radiusSlider.value));
+      radiusValueTag.textContent = `${val.toFixed(2)} sq`;
+
+      const now = Date.now();
+      if (now - lastRadiusPush >= 45) {
+        lastRadiusPush = now;
+        commitRadiusChange(val);
+      } else {
+        window.clearTimeout(radiusTimer);
+        radiusTimer = window.setTimeout(() => {
+          lastRadiusPush = Date.now();
+          commitRadiusChange(val);
+        }, 45);
+      }
+    });
+
+    radiusSlider.addEventListener("change", () => {
+      isDraggingRadius = false;
+      window.clearTimeout(radiusTimer);
+      commitRadiusChange(Number(radiusSlider.value));
+    });
 
     hiddenCheckbox.addEventListener("change", async () => {
       if ((await OBR.player.getRole()) !== "GM") return;
@@ -1081,6 +1277,9 @@ async function renderPopoverUI() {
             if (isImage(item) && item.layer === "CHARACTER") {
               item.metadata[META_KEY] = true;
               item.metadata[COLOR_META_KEY] = rgbaHex;
+              if (typeof item.metadata[RADIUS_META_KEY] !== "number") {
+                item.metadata[RADIUS_META_KEY] = selectionRadiusMultiplier;
+              }
             }
           }
         });
@@ -1105,6 +1304,8 @@ async function renderPopoverUI() {
             for (const item of items) {
               item.metadata[META_KEY] = true;
               item.metadata[COLOR_META_KEY] = rgbaHex;
+              item.metadata[RADIUS_META_KEY] =
+                targetGroup?.radiusMultiplier ?? DEFAULT_RADIUS_MULTIPLIER;
               if (targetGroup?.keepWhenHidden) {
                 item.metadata[KEEP_WHEN_HIDDEN_META_KEY] = true;
               } else {
@@ -1128,7 +1329,6 @@ async function renderPopoverUI() {
       const rgbaHex = formatRgbaHex(activeHex, nextOpacity);
       setDefaultRgbaHex(rgbaHex);
 
-      // Update the saved color preset if one is currently selected
       if (editingColorId) {
         const allColors = getSavedColors();
         const targetColor = allColors.find((c) => c.id === editingColorId);
@@ -1180,6 +1380,7 @@ async function renderPopoverUI() {
             item.metadata[GROUP_META_KEY] = group.id;
             item.metadata[META_KEY] = true;
             item.metadata[COLOR_META_KEY] = group.rgbaHex;
+            item.metadata[RADIUS_META_KEY] = group.radiusMultiplier;
             if (group.keepWhenHidden) {
               item.metadata[KEEP_WHEN_HIDDEN_META_KEY] = true;
             } else {
@@ -1398,6 +1599,7 @@ async function renderPopoverUI() {
         id: `group-${Date.now()}`,
         name: `Group ${nextNum}`,
         rgbaHex: formatRgbaHex(activeHex, activeOpacity),
+        radiusMultiplier: getDefaultRadiusMultiplier(),
         keepWhenHidden: false,
       };
       saveGroups([...current, newGroup]);
@@ -1553,6 +1755,7 @@ async function renderPopoverUI() {
           for (const item of items) {
             delete item.metadata[META_KEY];
             delete item.metadata[COLOR_META_KEY];
+            delete item.metadata[RADIUS_META_KEY];
             delete item.metadata[GROUP_META_KEY];
             delete item.metadata[KEEP_WHEN_HIDDEN_META_KEY];
           }
@@ -1590,6 +1793,7 @@ async function renderPopoverUI() {
         const items = await OBR.scene.items.getItems();
         const counts: Record<string, number> = {};
         let anySelectedKeep = false;
+        let foundSelectedRadius: number | null = null;
 
         for (const item of items) {
           if (isImage(item)) {
@@ -1597,16 +1801,26 @@ async function renderPopoverUI() {
             if (typeof gid === "string") {
               counts[gid] = (counts[gid] ?? 0) + 1;
             }
-            if (
-              selectedIds.includes(item.id) &&
-              item.metadata[KEEP_WHEN_HIDDEN_META_KEY]
-            ) {
-              anySelectedKeep = true;
+            if (selectedIds.includes(item.id)) {
+              if (item.metadata[KEEP_WHEN_HIDDEN_META_KEY]) {
+                anySelectedKeep = true;
+              }
+              if (
+                foundSelectedRadius === null &&
+                typeof item.metadata[RADIUS_META_KEY] === "number"
+              ) {
+                foundSelectedRadius = clampRadiusMultiplier(
+                  item.metadata[RADIUS_META_KEY]
+                );
+              }
             }
           }
         }
         groupCounts = counts;
         selectionKeepWhenHidden = anySelectedKeep;
+        if (foundSelectedRadius !== null) {
+          selectionRadiusMultiplier = foundSelectedRadius;
+        }
       }
 
       if (
@@ -1628,6 +1842,7 @@ async function renderPopoverUI() {
       colorSectionLabel,
       colorList,
       customSection,
+      radiusRow,
       hiddenToggleRow,
       removeBtn
     );
