@@ -9,8 +9,10 @@ import OBR, {
 
 const EXTENSION_ID = "com.custom.goo-aura";
 const META_KEY = `${EXTENSION_ID}/enabled`;
-const COLOR_META_KEY = `${EXTENSION_ID}/color`; // Stores "#rrggbbaa"
-const RADIUS_META_KEY = `${EXTENSION_ID}/radius`; // Stores base radius in grid squares
+const COLOR_META_KEY = `${EXTENSION_ID}/color`;     // "#rrggbbaa"
+const RIM_META_KEY = `${EXTENSION_ID}/rim`;         // 0.0 to 1.0
+const WOBBLE_META_KEY = `${EXTENSION_ID}/wobble`;   // 0.0 to 1.0
+const RADIUS_META_KEY = `${EXTENSION_ID}/radius`;   // Base radius in grid squares
 const GROUP_META_KEY = `${EXTENSION_ID}/group`;
 const KEEP_WHEN_HIDDEN_META_KEY = `${EXTENSION_ID}/keep-when-hidden`;
 const EFFECT_META_KEY = `${EXTENSION_ID}/is-goo-effect`;
@@ -19,27 +21,31 @@ const TOGGLE_MENU_ID = `${EXTENSION_ID}/toggle`;
 const HIDDEN_BEHAVIOR_MENU_ID = `${EXTENSION_ID}/toggle-hidden-behavior`;
 
 const CUSTOM_COLORS_STORAGE_KEY = `${EXTENSION_ID}/custom-colors`;
-const BUILTIN_OPACITIES_STORAGE_KEY = `${EXTENSION_ID}/builtin-opacities`;
-const DEFAULT_COLOR_STORAGE_KEY = `${EXTENSION_ID}/default-rgba`;
+const BUILTIN_PROPS_STORAGE_KEY = `${EXTENSION_ID}/builtin-props`;
+const DEFAULT_STYLE_STORAGE_KEY = `${EXTENSION_ID}/default-style`;
 const DEFAULT_RADIUS_STORAGE_KEY = `${EXTENSION_ID}/default-radius`;
 const GROUPS_STORAGE_KEY = `${EXTENSION_ID}/groups`;
 const ACTIVE_TARGET_STORAGE_KEY = `${EXTENSION_ID}/active-target`;
 
 const NUM_MATRICES = 20; // 20 matrices × 2 monsters per matrix = 40 monsters max
 const MAX_TOKENS = NUM_MATRICES * 2;
-const NUM_PALETTE_MATRICES = 6; // 6 matrices × 2 RGBA colors = 12 simultaneous colors
-const MAX_ACTIVE_PALETTE = NUM_PALETTE_MATRICES * 2;
+const NUM_PALETTE_MATRICES = 4; // 4 RGB matrices + 4 FX matrices = 12 simultaneous styles
+const MAX_ACTIVE_PALETTE = NUM_PALETTE_MATRICES * 3;
 
 const DEFAULT_RADIUS_MULTIPLIER = 1.25; // Default base radius in grid squares
 const MIN_RADIUS_MULTIPLIER = 0.5;
 const MAX_RADIUS_MULTIPLIER = 4.0;
-const DEFAULT_OPACITY = 0.42; // Starting opacity (42%)
+const DEFAULT_OPACITY = 0.42;
+const DEFAULT_RIM = 0.35;
+const DEFAULT_WOBBLE = 0.25;
 
 interface SavedGooColor {
   id: string;
   name: string;
   hex: string;     // "#rrggbb"
   opacity: number; // 0.0 to 1.0
+  rim: number;     // 0.0 to 1.0
+  wobble: number;  // 0.0 to 1.0
   builtIn?: boolean;
 }
 
@@ -47,22 +53,24 @@ interface SavedGooGroup {
   id: string;
   name: string;
   rgbaHex: string;          // "#rrggbbaa"
+  rim: number;              // 0.0 to 1.0
+  wobble: number;           // 0.0 to 1.0
   radiusMultiplier: number; // Base radius in grid squares
   keepWhenHidden?: boolean;
   builtIn?: boolean;
 }
 
 const STARTING_COLORS: SavedGooColor[] = [
-  { id: "builtin-acid",    name: "Acid Green",    hex: "#2ed959", opacity: DEFAULT_OPACITY, builtIn: true },
-  { id: "builtin-crimson", name: "Crimson Blood", hex: "#ef4444", opacity: DEFAULT_OPACITY, builtIn: true },
-  { id: "builtin-arcane",  name: "Arcane Purple", hex: "#a855f7", opacity: DEFAULT_OPACITY, builtIn: true },
+  { id: "builtin-acid",    name: "Acid Green",    hex: "#2ed959", opacity: DEFAULT_OPACITY, rim: 0.40, wobble: 0.30, builtIn: true },
+  { id: "builtin-crimson", name: "Crimson Blood", hex: "#ef4444", opacity: DEFAULT_OPACITY, rim: 0.35, wobble: 0.25, builtIn: true },
+  { id: "builtin-arcane",  name: "Arcane Purple", hex: "#a855f7", opacity: DEFAULT_OPACITY, rim: 0.50, wobble: 0.35, builtIn: true },
 ];
 
 const STARTING_GROUPS: SavedGooGroup[] = [
-  { id: "group-1", name: "Group 1", rgbaHex: "#2ed9596b", radiusMultiplier: DEFAULT_RADIUS_MULTIPLIER, keepWhenHidden: false, builtIn: true },
-  { id: "group-2", name: "Group 2", rgbaHex: "#ef44446b", radiusMultiplier: DEFAULT_RADIUS_MULTIPLIER, keepWhenHidden: false, builtIn: true },
-  { id: "group-3", name: "Group 3", rgbaHex: "#a855f76b", radiusMultiplier: DEFAULT_RADIUS_MULTIPLIER, keepWhenHidden: false, builtIn: true },
-  { id: "group-4", name: "Group 4", rgbaHex: "#06b6d46b", radiusMultiplier: DEFAULT_RADIUS_MULTIPLIER, keepWhenHidden: false, builtIn: true },
+  { id: "group-1", name: "Group 1", rgbaHex: "#2ed9596b", rim: 0.40, wobble: 0.30, radiusMultiplier: DEFAULT_RADIUS_MULTIPLIER, keepWhenHidden: false, builtIn: true },
+  { id: "group-2", name: "Group 2", rgbaHex: "#ef44446b", rim: 0.35, wobble: 0.25, radiusMultiplier: DEFAULT_RADIUS_MULTIPLIER, keepWhenHidden: false, builtIn: true },
+  { id: "group-3", name: "Group 3", rgbaHex: "#a855f76b", rim: 0.50, wobble: 0.35, radiusMultiplier: DEFAULT_RADIUS_MULTIPLIER, keepWhenHidden: false, builtIn: true },
+  { id: "group-4", name: "Group 4", rgbaHex: "#06b6d46b", rim: 0.40, wobble: 0.25, radiusMultiplier: DEFAULT_RADIUS_MULTIPLIER, keepWhenHidden: false, builtIn: true },
 ];
 
 const matrixUniforms = Array.from(
@@ -72,20 +80,20 @@ const matrixUniforms = Array.from(
 
 const paletteUniforms = Array.from(
   { length: NUM_PALETTE_MATRICES },
-  (_, p) => `uniform float3x3 uPal${p};`
+  (_, p) => `uniform float3x3 uPalCol${p};\nuniform float3x3 uPalFx${p};`
 ).join("\n");
 
-// Each 3x3 matrix packs 2 monsters across its first 8 floats: [x, y, paletteIndex, radius]
-const slotDefs: { pos: string; col: string; rad: string }[] = [];
+// Each 3x3 matrix packs 2 monsters across its first 8 floats: [x, y, styleIndex, radius]
+const slotDefs: { pos: string; style: string; rad: string }[] = [];
 for (let m = 0; m < NUM_MATRICES; m++) {
   slotDefs.push({
     pos: `float2(uM${m}[0][0], uM${m}[0][1])`,
-    col: `uM${m}[0][2]`,
+    style: `uM${m}[0][2]`,
     rad: `uM${m}[1][0]`,
   });
   slotDefs.push({
     pos: `float2(uM${m}[1][1], uM${m}[1][2])`,
-    col: `uM${m}[2][0]`,
+    style: `uM${m}[2][0]`,
     rad: `uM${m}[2][1]`,
   });
 }
@@ -96,32 +104,31 @@ const mergeSteps = slotDefs
     (slot, i) => `
     if (uCount > ${i + 1.5}) {
         float ri = ${slot.rad};
-        float di = length(coord - ${slot.pos}) - ri;
-        half4 ci = getPaletteColor(${slot.col});
+        half4 ci = getStyleColor(${slot.style});
+        half3 fxi = getStyleFx(${slot.style});
+        float di = evalBlobDist(coord, ${slot.pos}, ri, float(fxi.z), ${(i + 1) * 1.73});
         float k = max(min(curRad, ri) * 0.65, 1.0);
         float h = clamp(0.5 + 0.5 * (di - d) / k, 0.0, 1.0);
         d = mix(di, d, h) - k * h * (1.0 - h);
         col = mix(ci, col, half(h));
+        curRim = mix(float(fxi.y), curRim, h);
         curRad = mix(ri, curRad, h);
     }`
   )
   .join("\n");
 
-// Each 3x3 palette matrix stores 2 RGBA colors across its first 8 floats
-const paletteLookupLines: string[] = [];
+const paletteColorLookupLines: string[] = [];
+const paletteFxLookupLines: string[] = [];
 for (let p = 0; p < NUM_PALETTE_MATRICES; p++) {
-  const idx0 = p * 2;
-  const idx1 = p * 2 + 1;
-  paletteLookupLines.push(
-    `    if (idx < ${idx0 + 0.5}) return half4(uPal${p}[0][0], uPal${p}[0][1], uPal${p}[0][2], uPal${p}[1][0]);`
-  );
-  if (idx1 < MAX_ACTIVE_PALETTE - 1) {
-    paletteLookupLines.push(
-      `    if (idx < ${idx1 + 0.5}) return half4(uPal${p}[1][1], uPal${p}[1][2], uPal${p}[2][0], uPal${p}[2][1]);`
+  for (let r = 0; r < 3; r++) {
+    const idx = p * 3 + r;
+    const isLast = idx === MAX_ACTIVE_PALETTE - 1;
+    const prefix = isLast ? "    return" : `    if (idx < ${idx + 0.5}) return`;
+    paletteColorLookupLines.push(
+      `${prefix} half4(uPalCol${p}[${r}][0], uPalCol${p}[${r}][1], uPalCol${p}[${r}][2], uPalFx${p}[${r}][0]);`
     );
-  } else {
-    paletteLookupLines.push(
-      `    return half4(uPal${p}[1][1], uPal${p}[1][2], uPal${p}[2][0], uPal${p}[2][1]);`
+    paletteFxLookupLines.push(
+      `${prefix} half3(uPalFx${p}[${r}][0], uPalFx${p}[${r}][1], uPalFx${p}[${r}][2]);`
     );
   }
 }
@@ -132,9 +139,41 @@ ${matrixUniforms}
 ${paletteUniforms}
 
 uniform float uCount;
+uniform float uTime;
 
-half4 getPaletteColor(float idx) {
-${paletteLookupLines.join("\n")}
+half4 getStyleColor(float idx) {
+${paletteColorLookupLines.join("\n")}
+}
+
+// Returns half3(opacity, rimHighlight, wobbleStrength)
+half3 getStyleFx(float idx) {
+${paletteFxLookupLines.join("\n")}
+}
+
+// Seamless multi-harmonic organic membrane undulation
+float evalBlobDist(float2 coord, float2 center, float radius, float wobble, float phase) {
+    float2 delta = coord - center;
+    float dist = length(delta);
+    if (wobble <= 0.001 || dist <= 0.001) {
+        return dist - radius;
+    }
+
+    float2 u = delta / dist;
+    float c2 = u.x * u.x - u.y * u.y;
+    float s2 = 2.0 * u.x * u.y;
+    float c3 = u.x * (4.0 * u.x * u.x - 3.0);
+    float s3 = u.y * (3.0 - 4.0 * u.y * u.y);
+
+    float t1 = uTime * 1.15 + phase;
+    float t2 = -uTime * 0.85 + phase * 1.7;
+    float t3 = uTime * 1.65 + phase * 2.3;
+
+    float wave = 0.50 * (c2 * cos(t1) + s2 * sin(t1))
+               + 0.35 * (c3 * cos(t2) + s3 * sin(t2))
+               + 0.15 * sin(t3 + (u.x + u.y) * 3.0);
+
+    float amp = radius * 0.14 * wobble;
+    return dist - (radius + wave * amp);
 }
 
 half4 main(float2 coord) {
@@ -143,20 +182,33 @@ half4 main(float2 coord) {
     }
 
     float curRad = ${slotDefs[0].rad};
-    float d = length(coord - ${slotDefs[0].pos}) - curRad;
-    half4 col = getPaletteColor(${slotDefs[0].col});
+    half4 col = getStyleColor(${slotDefs[0].style});
+    half3 fx0 = getStyleFx(${slotDefs[0].style});
+    float curRim = float(fx0.y);
+    float d = evalBlobDist(coord, ${slotDefs[0].pos}, curRad, float(fx0.z), 0.0);
 ${mergeSteps}
 
-    // Crisp anti-aliased liquid edge with per-color interpolated opacity
-    float mask = 1.0 - smoothstep(-1.5, 1.5, d);
-    float alpha = mask * float(col.a);
+    // Crisp anti-aliased liquid edge
+    float fillMask = 1.0 - smoothstep(-1.5, 1.5, d);
+    float baseAlpha = fillMask * float(col.a);
+
+    // Translucent liquid meniscus rim highlight along the inner edge
+    float rimWidth = mix(2.5, 7.5, curRim);
+    float innerBand = smoothstep(-rimWidth, -1.0, d);
+    float outerCut = 1.0 - smoothstep(-0.5, 1.2, d);
+    float rimMask = innerBand * outerCut * curRim;
+
+    float finalAlpha = clamp(baseAlpha + rimMask * 0.48, 0.0, 1.0);
+    half3 highlightRgb = min(col.rgb * half(1.45) + half3(0.32), half3(1.0));
+    half3 finalRgb = mix(col.rgb, highlightRgb, half(rimMask * 0.85));
 
     // Skia requires premultiplied alpha
-    return half4(col.rgb * half(alpha), half(alpha));
+    return half4(finalRgb * half(finalAlpha), half(finalAlpha));
 }
 `;
 
-function clampOpacity(val: number): number {
+function clampUnit(val: number, fallback: number): number {
+  if (!Number.isFinite(val)) return fallback;
   return Math.min(1, Math.max(0, val));
 }
 
@@ -208,7 +260,7 @@ function normalizeRgbHex(input: string): string | null {
 
 function formatRgbaHex(rgbHex: string, opacity: number): string {
   const cleanRgb = normalizeRgbHex(rgbHex) ?? STARTING_COLORS[0].hex;
-  const alphaByte = Math.round(clampOpacity(opacity) * 255)
+  const alphaByte = Math.round(clampUnit(opacity, DEFAULT_OPACITY) * 255)
     .toString(16)
     .padStart(2, "0");
   return `${cleanRgb}${alphaByte}`;
@@ -225,12 +277,12 @@ function parseRgbaHex(
   if (/^[0-9a-fA-F]{8}$/.test(trimmed)) {
     const hex = `#${trimmed.slice(0, 6).toLowerCase()}`;
     const opacity = parseInt(trimmed.slice(6, 8), 16) / 255;
-    return { hex, opacity: clampOpacity(opacity) };
+    return { hex, opacity: clampUnit(opacity, fallbackOpacity) };
   }
   if (/^[0-9a-fA-F]{4}$/.test(trimmed)) {
     const hex = `#${trimmed[0]}${trimmed[0]}${trimmed[1]}${trimmed[1]}${trimmed[2]}${trimmed[2]}`.toLowerCase();
     const opacity = parseInt(`${trimmed[3]}${trimmed[3]}`, 16) / 255;
-    return { hex, opacity: clampOpacity(opacity) };
+    return { hex, opacity: clampUnit(opacity, fallbackOpacity) };
   }
   const rgbOnly = normalizeRgbHex(trimmed);
   if (rgbOnly) {
@@ -239,20 +291,25 @@ function parseRgbaHex(
   return { hex: STARTING_COLORS[0].hex, opacity: fallbackOpacity };
 }
 
-function rgbaHexToFloat4(rgbaHex: string): [number, number, number, number] {
-  const { hex, opacity } = parseRgbaHex(rgbaHex);
-  const num = parseInt(hex.slice(1), 16);
+function hexToRgbFloat3(rgbHex: string): [number, number, number] {
+  const clean = normalizeRgbHex(rgbHex) ?? STARTING_COLORS[0].hex;
+  const num = parseInt(clean.slice(1), 16);
   return [
     ((num >> 16) & 255) / 255,
     ((num >> 8) & 255) / 255,
     (num & 255) / 255,
-    opacity,
   ];
 }
 
-function getBuiltInOpacities(): Record<string, number> {
+interface BuiltInStyleOverride {
+  opacity?: number;
+  rim?: number;
+  wobble?: number;
+}
+
+function getBuiltInOverrides(): Record<string, BuiltInStyleOverride> {
   try {
-    const raw = localStorage.getItem(BUILTIN_OPACITIES_STORAGE_KEY);
+    const raw = localStorage.getItem(BUILTIN_PROPS_STORAGE_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw);
     return parsed && typeof parsed === "object" ? parsed : {};
@@ -261,21 +318,29 @@ function getBuiltInOpacities(): Record<string, number> {
   }
 }
 
-function saveBuiltInOpacity(id: string, opacity: number) {
-  const current = getBuiltInOpacities();
-  current[id] = clampOpacity(opacity);
-  localStorage.setItem(BUILTIN_OPACITIES_STORAGE_KEY, JSON.stringify(current));
+function saveBuiltInOverride(id: string, patch: BuiltInStyleOverride) {
+  const current = getBuiltInOverrides();
+  current[id] = { ...(current[id] ?? {}), ...patch };
+  localStorage.setItem(BUILTIN_PROPS_STORAGE_KEY, JSON.stringify(current));
 }
 
 function getSavedColors(): SavedGooColor[] {
-  const builtInOpacities = getBuiltInOpacities();
-  const builtIns = STARTING_COLORS.map((c) => ({
-    ...c,
-    opacity:
-      typeof builtInOpacities[c.id] === "number"
-        ? clampOpacity(builtInOpacities[c.id])
-        : c.opacity,
-  }));
+  const overrides = getBuiltInOverrides();
+  const builtIns = STARTING_COLORS.map((c) => {
+    const ov = overrides[c.id];
+    return {
+      ...c,
+      opacity:
+        typeof ov?.opacity === "number"
+          ? clampUnit(ov.opacity, c.opacity)
+          : c.opacity,
+      rim: typeof ov?.rim === "number" ? clampUnit(ov.rim, c.rim) : c.rim,
+      wobble:
+        typeof ov?.wobble === "number"
+          ? clampUnit(ov.wobble, c.wobble)
+          : c.wobble,
+    };
+  });
 
   try {
     const raw = localStorage.getItem(CUSTOM_COLORS_STORAGE_KEY);
@@ -295,10 +360,9 @@ function getSavedColors(): SavedGooColor[] {
         id: c.id,
         name: c.name,
         hex: normalizeRgbHex(c.hex)!,
-        opacity:
-          typeof c.opacity === "number" && Number.isFinite(c.opacity)
-            ? clampOpacity(c.opacity)
-            : DEFAULT_OPACITY,
+        opacity: clampUnit(Number(c.opacity), DEFAULT_OPACITY),
+        rim: clampUnit(Number(c.rim), DEFAULT_RIM),
+        wobble: clampUnit(Number(c.wobble), DEFAULT_WOBBLE),
       }));
     return [...builtIns, ...custom];
   } catch {
@@ -331,6 +395,8 @@ function getSavedGroups(): SavedGooGroup[] {
         id: g.id,
         name: g.name,
         rgbaHex: formatRgbaHex(hex, opacity),
+        rim: clampUnit(Number(g.rim), DEFAULT_RIM),
+        wobble: clampUnit(Number(g.wobble), DEFAULT_WOBBLE),
         radiusMultiplier:
           typeof g.radiusMultiplier === "number"
             ? clampRadiusMultiplier(g.radiusMultiplier)
@@ -349,15 +415,48 @@ function saveGroups(groups: SavedGooGroup[]) {
   localStorage.setItem(GROUPS_STORAGE_KEY, JSON.stringify(groups));
 }
 
-function getDefaultRgbaHex(): string {
-  const saved = localStorage.getItem(DEFAULT_COLOR_STORAGE_KEY);
-  const { hex, opacity } = parseRgbaHex(saved);
-  return formatRgbaHex(hex, opacity);
+interface DefaultStyleState {
+  rgbaHex: string;
+  rim: number;
+  wobble: number;
 }
 
-function setDefaultRgbaHex(rgbaHex: string) {
-  const { hex, opacity } = parseRgbaHex(rgbaHex);
-  localStorage.setItem(DEFAULT_COLOR_STORAGE_KEY, formatRgbaHex(hex, opacity));
+function getDefaultStyle(): DefaultStyleState {
+  try {
+    const raw = localStorage.getItem(DEFAULT_STYLE_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      const { hex, opacity } = parseRgbaHex(parsed?.rgbaHex);
+      return {
+        rgbaHex: formatRgbaHex(hex, opacity),
+        rim: clampUnit(Number(parsed?.rim), DEFAULT_RIM),
+        wobble: clampUnit(Number(parsed?.wobble), DEFAULT_WOBBLE),
+      };
+    }
+  } catch {
+    // Fall through to defaults
+  }
+  return {
+    rgbaHex: formatRgbaHex(STARTING_COLORS[0].hex, DEFAULT_OPACITY),
+    rim: DEFAULT_RIM,
+    wobble: DEFAULT_WOBBLE,
+  };
+}
+
+function setDefaultStyle(patch: Partial<DefaultStyleState>) {
+  const current = getDefaultStyle();
+  const next: DefaultStyleState = {
+    rgbaHex: patch.rgbaHex ?? current.rgbaHex,
+    rim:
+      typeof patch.rim === "number"
+        ? clampUnit(patch.rim, current.rim)
+        : current.rim,
+    wobble:
+      typeof patch.wobble === "number"
+        ? clampUnit(patch.wobble, current.wobble)
+        : current.wobble,
+  };
+  localStorage.setItem(DEFAULT_STYLE_STORAGE_KEY, JSON.stringify(next));
 }
 
 function getDefaultRadiusMultiplier(): number {
@@ -381,8 +480,56 @@ function setStoredActiveTarget(target: string) {
   localStorage.setItem(ACTIVE_TARGET_STORAGE_KEY, target);
 }
 
+// --- WOBBLE ANIMATION LOOP (Only runs when at least one active token has wobble > 0) ---
+const ANIMATION_EPOCH = performance.now();
+let wobbleAnimTimer: number | undefined;
+let activeEffectId: string | null = null;
+let hasActiveWobble = false;
 let isSyncing = false;
 let syncQueued = false;
+
+function getShaderTimeSeconds(): number {
+  return ((performance.now() - ANIMATION_EPOCH) / 1000) % 628.3185;
+}
+
+function updateWobbleAnimationLoop() {
+  if (hasActiveWobble && activeEffectId) {
+    if (wobbleAnimTimer === undefined) {
+      wobbleAnimTimer = window.setInterval(async () => {
+        if (!hasActiveWobble || !activeEffectId || isSyncing) return;
+        const t = getShaderTimeSeconds();
+        try {
+          await OBR.scene.local.updateItems<Effect>(
+            [activeEffectId],
+            (draft) => {
+              const effect = draft[0];
+              if (!effect) return;
+              const timeUniform = effect.uniforms.find(
+                (u) => u.name === "uTime"
+              );
+              if (timeUniform) {
+                timeUniform.value = t;
+              }
+            }
+          );
+        } catch {
+          // Ignore transient scene transitions
+        }
+      }, 40); // ~25 FPS smooth organic undulation
+    }
+  } else if (wobbleAnimTimer !== undefined) {
+    window.clearInterval(wobbleAnimTimer);
+    wobbleAnimTimer = undefined;
+  }
+}
+
+interface ActiveStyleEntry {
+  key: string;
+  rgb: [number, number, number];
+  opacity: number;
+  rim: number;
+  wobble: number;
+}
 
 // Runs for both GMs and Players so everyone sees the rendered goo
 async function syncGooEffect() {
@@ -394,7 +541,12 @@ async function syncGooEffect() {
 
   try {
     const sceneReady = await OBR.scene.isReady();
-    if (!sceneReady) return;
+    if (!sceneReady) {
+      hasActiveWobble = false;
+      activeEffectId = null;
+      updateWobbleAnimationLoop();
+      return;
+    }
 
     const [items, localItems, dpi] = await Promise.all([
       OBR.scene.items.getItems(),
@@ -402,9 +554,14 @@ async function syncGooEffect() {
       OBR.scene.grid.getDpi(),
     ]);
 
-    // Collect positions, RGBA hex colors, and size-scaled radii of up to 40 tokens
-    const activeRgbaHexes: string[] = [];
-    const tokens: { x: number; y: number; colorIdx: number; radius: number }[] = [];
+    const activeStyles: ActiveStyleEntry[] = [];
+    const tokens: {
+      x: number;
+      y: number;
+      styleIdx: number;
+      radius: number;
+    }[] = [];
+    let anyWobble = false;
 
     for (const item of items) {
       if (isImage(item) && item.metadata[META_KEY]) {
@@ -414,15 +571,33 @@ async function syncGooEffect() {
         }
 
         const { hex, opacity } = parseRgbaHex(item.metadata[COLOR_META_KEY]);
-        const rgbaHex = formatRgbaHex(hex, opacity);
+        const rim =
+          typeof item.metadata[RIM_META_KEY] === "number"
+            ? clampUnit(item.metadata[RIM_META_KEY], DEFAULT_RIM)
+            : DEFAULT_RIM;
+        const wobble =
+          typeof item.metadata[WOBBLE_META_KEY] === "number"
+            ? clampUnit(item.metadata[WOBBLE_META_KEY], DEFAULT_WOBBLE)
+            : DEFAULT_WOBBLE;
 
-        let colorIdx = activeRgbaHexes.indexOf(rgbaHex);
-        if (colorIdx === -1) {
-          if (activeRgbaHexes.length < MAX_ACTIVE_PALETTE) {
-            colorIdx = activeRgbaHexes.length;
-            activeRgbaHexes.push(rgbaHex);
+        if (wobble > 0.005) {
+          anyWobble = true;
+        }
+
+        const styleKey = `${hex}|${opacity.toFixed(3)}|${rim.toFixed(3)}|${wobble.toFixed(3)}`;
+        let styleIdx = activeStyles.findIndex((s) => s.key === styleKey);
+        if (styleIdx === -1) {
+          if (activeStyles.length < MAX_ACTIVE_PALETTE) {
+            styleIdx = activeStyles.length;
+            activeStyles.push({
+              key: styleKey,
+              rgb: hexToRgbFloat3(hex),
+              opacity,
+              rim,
+              wobble,
+            });
           } else {
-            colorIdx = activeRgbaHexes.length - 1;
+            styleIdx = activeStyles.length - 1;
           }
         }
 
@@ -438,7 +613,7 @@ async function syncGooEffect() {
         tokens.push({
           x: item.position.x,
           y: item.position.y,
-          colorIdx,
+          styleIdx,
           radius: pixelRadius,
         });
         if (tokens.length >= MAX_TOKENS) break;
@@ -450,20 +625,23 @@ async function syncGooEffect() {
     );
 
     if (tokens.length === 0) {
+      hasActiveWobble = false;
+      activeEffectId = null;
+      updateWobbleAnimationLoop();
       if (existingEffect) {
         await OBR.scene.local.deleteItems([existingEffect.id]);
       }
       return;
     }
 
-    // Calculate dynamic bounding box accounting for each token's scaled radius + liquid bridge stretch
+    // Calculate dynamic bounding box accounting for each token's scaled radius + wobble + liquid bridge
     let minX = Infinity;
     let minY = Infinity;
     let maxX = -Infinity;
     let maxY = -Infinity;
 
     for (const t of tokens) {
-      const pad = t.radius * 1.75 + 4;
+      const pad = t.radius * 1.95 + 6;
       if (t.x - pad < minX) minX = t.x - pad;
       if (t.y - pad < minY) minY = t.y - pad;
       if (t.x + pad > maxX) maxX = t.x + pad;
@@ -473,18 +651,37 @@ async function syncGooEffect() {
     const width = Math.max(maxX - minX, 1);
     const height = Math.max(maxY - minY, 1);
 
-    const uniforms: Uniform[] = [{ name: "uCount", value: tokens.length }];
+    const uniforms: Uniform[] = [
+      { name: "uCount", value: tokens.length },
+      { name: "uTime", value: anyWobble ? getShaderTimeSeconds() : 0 },
+    ];
 
-    // Pack up to 12 active RGBA colors into 6 float3x3 palette matrices (2 RGBA per matrix)
-    const fallbackRgba = STARTING_GROUPS[0].rgbaHex;
+    const fallbackStyle: ActiveStyleEntry = {
+      key: "fallback",
+      rgb: hexToRgbFloat3(STARTING_COLORS[0].hex),
+      opacity: DEFAULT_OPACITY,
+      rim: DEFAULT_RIM,
+      wobble: DEFAULT_WOBBLE,
+    };
+
+    // Pack up to 12 styles into 4 RGB matrices + 4 FX matrices
     for (let p = 0; p < NUM_PALETTE_MATRICES; p++) {
-      const c0 = rgbaHexToFloat4(activeRgbaHexes[p * 2 + 0] ?? fallbackRgba);
-      const c1 = rgbaHexToFloat4(activeRgbaHexes[p * 2 + 1] ?? fallbackRgba);
-      const palMat: Matrix = [...c0, ...c1, 0];
-      uniforms.push({ name: `uPal${p}`, value: palMat });
+      const s0 = activeStyles[p * 3 + 0] ?? fallbackStyle;
+      const s1 = activeStyles[p * 3 + 1] ?? fallbackStyle;
+      const s2 = activeStyles[p * 3 + 2] ?? fallbackStyle;
+
+      const colMat: Matrix = [...s0.rgb, ...s1.rgb, ...s2.rgb];
+      const fxMat: Matrix = [
+        s0.opacity, s0.rim, s0.wobble,
+        s1.opacity, s1.rim, s1.wobble,
+        s2.opacity, s2.rim, s2.wobble,
+      ];
+
+      uniforms.push({ name: `uPalCol${p}`, value: colMat });
+      uniforms.push({ name: `uPalFx${p}`, value: fxMat });
     }
 
-    // Pack 2 monsters per 9-element Matrix: [x, y, paletteIndex, radius] × 2 + [0]
+    // Pack 2 monsters per 9-element Matrix: [x, y, styleIndex, radius] × 2 + [0]
     for (let m = 0; m < NUM_MATRICES; m++) {
       const t0 = tokens[m * 2 + 0];
       const t1 = tokens[m * 2 + 1];
@@ -492,11 +689,11 @@ async function syncGooEffect() {
       const mat: Matrix = [
         t0 ? t0.x - minX : 0,
         t0 ? t0.y - minY : 0,
-        t0 ? t0.colorIdx : 0,
+        t0 ? t0.styleIdx : 0,
         t0 ? t0.radius : 0,
         t1 ? t1.x - minX : 0,
         t1 ? t1.y - minY : 0,
-        t1 ? t1.colorIdx : 0,
+        t1 ? t1.styleIdx : 0,
         t1 ? t1.radius : 0,
         0,
       ];
@@ -520,7 +717,9 @@ async function syncGooEffect() {
         .build();
 
       await OBR.scene.local.addItems([effect]);
+      activeEffectId = effect.id;
     } else {
+      activeEffectId = existingEffect.id;
       await OBR.scene.local.updateItems<Effect>(
         [existingEffect.id],
         (draft) => {
@@ -534,6 +733,9 @@ async function syncGooEffect() {
         }
       );
     }
+
+    hasActiveWobble = anyWobble;
+    updateWobbleAnimationLoop();
   } finally {
     isSyncing = false;
     if (syncQueued) {
@@ -577,7 +779,7 @@ async function syncContextMenuForRole(role: "GM" | "PLAYER") {
         const shouldEnable = context.items.some(
           (item) => !item.metadata[META_KEY]
         );
-        const defaultRgba = getDefaultRgbaHex();
+        const defStyle = getDefaultStyle();
         const defaultRadius = getDefaultRadiusMultiplier();
 
         await OBR.scene.items.updateItems(context.items, (items) => {
@@ -585,7 +787,13 @@ async function syncContextMenuForRole(role: "GM" | "PLAYER") {
             if (shouldEnable) {
               item.metadata[META_KEY] = true;
               if (typeof item.metadata[COLOR_META_KEY] !== "string") {
-                item.metadata[COLOR_META_KEY] = defaultRgba;
+                item.metadata[COLOR_META_KEY] = defStyle.rgbaHex;
+              }
+              if (typeof item.metadata[RIM_META_KEY] !== "number") {
+                item.metadata[RIM_META_KEY] = defStyle.rim;
+              }
+              if (typeof item.metadata[WOBBLE_META_KEY] !== "number") {
+                item.metadata[WOBBLE_META_KEY] = defStyle.wobble;
               }
               if (typeof item.metadata[RADIUS_META_KEY] !== "number") {
                 item.metadata[RADIUS_META_KEY] = defaultRadius;
@@ -593,6 +801,8 @@ async function syncContextMenuForRole(role: "GM" | "PLAYER") {
             } else {
               delete item.metadata[META_KEY];
               delete item.metadata[COLOR_META_KEY];
+              delete item.metadata[RIM_META_KEY];
+              delete item.metadata[WOBBLE_META_KEY];
               delete item.metadata[RADIUS_META_KEY];
               delete item.metadata[KEEP_WHEN_HIDDEN_META_KEY];
             }
@@ -718,16 +928,16 @@ async function renderPopoverUI() {
     .goo-slider::-webkit-slider-thumb {
       -webkit-appearance: none;
       appearance: none;
-      width: 13px;
-      height: 13px;
+      width: 12px;
+      height: 12px;
       border-radius: 50%;
       background: #3b82f6;
       border: 2px solid #ffffff;
       cursor: pointer;
     }
     .goo-slider::-moz-range-thumb {
-      width: 13px;
-      height: 13px;
+      width: 12px;
+      height: 12px;
       border-radius: 50%;
       background: #3b82f6;
       border: 2px solid #ffffff;
@@ -766,16 +976,62 @@ async function renderPopoverUI() {
     document.body.replaceChildren(wrapper);
   }
 
+  function createCompactSlider(
+    labelText: string,
+    min: number,
+    max: number,
+    step: number,
+    initialValue: number,
+    formatValue: (v: number) => string
+  ) {
+    const row = document.createElement("div");
+    row.style.display = "flex";
+    row.style.flexDirection = "column";
+    row.style.gap = "3px";
+
+    const topRow = document.createElement("div");
+    topRow.style.display = "flex";
+    topRow.style.justifyContent = "space-between";
+    topRow.style.alignItems = "center";
+
+    const label = document.createElement("span");
+    label.style.fontSize = "10.5px";
+    label.style.color = "#d1d5db";
+    label.textContent = labelText;
+
+    const valueTag = document.createElement("span");
+    valueTag.style.fontSize = "10.5px";
+    valueTag.style.fontFamily = "monospace";
+    valueTag.style.color = "#93c5fd";
+    valueTag.textContent = formatValue(initialValue);
+
+    const slider = document.createElement("input");
+    slider.type = "range";
+    slider.className = "goo-slider";
+    slider.min = String(min);
+    slider.max = String(max);
+    slider.step = String(step);
+    slider.value = String(initialValue);
+
+    topRow.append(label, valueTag);
+    row.append(topRow, slider);
+
+    return { row, slider, valueTag };
+  }
+
   function renderGmEditorView() {
     const container = document.createElement("div");
-    container.style.padding = "12px";
+    container.style.padding = "10px 12px";
     container.style.display = "flex";
     container.style.flexDirection = "column";
     container.style.height = "100vh";
 
-    const initialRgba = parseRgbaHex(getDefaultRgbaHex());
+    const initialDef = getDefaultStyle();
+    const initialRgba = parseRgbaHex(initialDef.rgbaHex);
     let activeHex = initialRgba.hex;
     let activeOpacity = initialRgba.opacity;
+    let activeRim = initialDef.rim;
+    let activeWobble = initialDef.wobble;
     let editingColorId: string | null =
       getSavedColors().find((c) => c.hex === activeHex)?.id ?? null;
 
@@ -784,14 +1040,14 @@ async function renderPopoverUI() {
     let selectedCount = 0;
     let selectionKeepWhenHidden = false;
     let selectionRadiusMultiplier = getDefaultRadiusMultiplier();
-    let isDraggingRadius = false;
+    let isDraggingAnySlider = false;
 
     // Header
     const headerRow = document.createElement("div");
     headerRow.style.display = "flex";
     headerRow.style.justifyContent = "space-between";
     headerRow.style.alignItems = "center";
-    headerRow.style.marginBottom = "8px";
+    headerRow.style.marginBottom = "6px";
 
     const title = document.createElement("span");
     title.style.fontSize = "13px";
@@ -810,7 +1066,7 @@ async function renderPopoverUI() {
     groupHeaderRow.style.display = "flex";
     groupHeaderRow.style.justifyContent = "space-between";
     groupHeaderRow.style.alignItems = "center";
-    groupHeaderRow.style.marginBottom = "5px";
+    groupHeaderRow.style.marginBottom = "4px";
 
     const groupSectionLabel = document.createElement("span");
     groupSectionLabel.style.fontSize = "11px";
@@ -836,12 +1092,12 @@ async function renderPopoverUI() {
     groupList.className = "goo-scroll";
     groupList.style.display = "flex";
     groupList.style.flexDirection = "column";
-    groupList.style.gap = "5px";
-    groupList.style.maxHeight = "136px";
+    groupList.style.gap = "4px";
+    groupList.style.maxHeight = "124px";
     groupList.style.overflowY = "auto";
     groupList.style.overflowX = "hidden";
     groupList.style.padding = "1px";
-    groupList.style.marginBottom = "8px";
+    groupList.style.marginBottom = "7px";
 
     // --- COLORS SECTION ---
     const colorSectionLabel = document.createElement("div");
@@ -849,77 +1105,69 @@ async function renderPopoverUI() {
     colorSectionLabel.style.fontWeight = "600";
     colorSectionLabel.style.color = "#9ca3af";
     colorSectionLabel.style.borderTop = "1px solid #2e3038";
-    colorSectionLabel.style.paddingTop = "8px";
-    colorSectionLabel.style.marginBottom = "5px";
+    colorSectionLabel.style.paddingTop = "6px";
+    colorSectionLabel.style.marginBottom = "4px";
     colorSectionLabel.textContent = "Apply Color to Target";
 
     const colorList = document.createElement("div");
     colorList.className = "goo-scroll";
     colorList.style.display = "flex";
     colorList.style.flexDirection = "column";
-    colorList.style.gap = "5px";
+    colorList.style.gap = "4px";
     colorList.style.flex = "1";
-    colorList.style.minHeight = "62px";
+    colorList.style.minHeight = "56px";
     colorList.style.overflowY = "auto";
     colorList.style.overflowX = "hidden";
     colorList.style.padding = "2px";
-    colorList.style.marginBottom = "8px";
+    colorList.style.marginBottom = "7px";
 
-    // --- COLOR OPACITY & CUSTOM COLOR SECTION ---
-    const customSection = document.createElement("div");
-    customSection.style.borderTop = "1px solid #2e3038";
-    customSection.style.paddingTop = "8px";
-    customSection.style.marginBottom = "8px";
-    customSection.style.display = "flex";
-    customSection.style.flexDirection = "column";
-    customSection.style.gap = "6px";
+    // --- COLOR PROPERTIES & CUSTOM COLOR SECTION ---
+    const colorPropsBox = document.createElement("div");
+    colorPropsBox.style.padding = "6px 8px";
+    colorPropsBox.style.marginBottom = "6px";
+    colorPropsBox.style.borderRadius = "6px";
+    colorPropsBox.style.background = "#141519";
+    colorPropsBox.style.border = "1px solid #2e3038";
+    colorPropsBox.style.display = "flex";
+    colorPropsBox.style.flexDirection = "column";
+    colorPropsBox.style.gap = "6px";
 
-    // Per-Color Opacity Slider
-    const opacityRow = document.createElement("div");
-    opacityRow.style.display = "flex";
-    opacityRow.style.flexDirection = "column";
-    opacityRow.style.gap = "4px";
-    opacityRow.style.padding = "5px 8px";
-    opacityRow.style.borderRadius = "6px";
-    opacityRow.style.background = "#141519";
-    opacityRow.style.border = "1px solid #2e3038";
+    const opacityCtrl = createCompactSlider(
+      "Color Opacity",
+      0,
+      100,
+      1,
+      Math.round(activeOpacity * 100),
+      (v) => `${Math.round(v)}%`
+    );
 
-    const opacityTopRow = document.createElement("div");
-    opacityTopRow.style.display = "flex";
-    opacityTopRow.style.justifyContent = "space-between";
-    opacityTopRow.style.alignItems = "center";
+    const rimCtrl = createCompactSlider(
+      "Edge Highlight",
+      0,
+      100,
+      1,
+      Math.round(activeRim * 100),
+      (v) => `${Math.round(v)}%`
+    );
 
-    const opacityLabel = document.createElement("span");
-    opacityLabel.style.fontSize = "11px";
-    opacityLabel.style.color = "#d1d5db";
-    opacityLabel.textContent = "Color Opacity";
-
-    const opacityValueTag = document.createElement("span");
-    opacityValueTag.style.fontSize = "11px";
-    opacityValueTag.style.fontFamily = "monospace";
-    opacityValueTag.style.color = "#93c5fd";
-    opacityValueTag.textContent = `${Math.round(activeOpacity * 100)}%`;
-
-    const opacitySlider = document.createElement("input");
-    opacitySlider.type = "range";
-    opacitySlider.className = "goo-slider";
-    opacitySlider.min = "0";
-    opacitySlider.max = "100";
-    opacitySlider.step = "1";
-    opacitySlider.value = String(Math.round(activeOpacity * 100));
-
-    opacityTopRow.append(opacityLabel, opacityValueTag);
-    opacityRow.append(opacityTopRow, opacitySlider);
+    const wobbleCtrl = createCompactSlider(
+      "Organic Wobble",
+      0,
+      100,
+      1,
+      Math.round(activeWobble * 100),
+      (v) => `${Math.round(v)}%`
+    );
 
     // Custom Color Name + Picker + Hex + Save
     const nameInput = document.createElement("input");
     nameInput.type = "text";
     nameInput.placeholder = "New color name (e.g. Bile Yellow)";
     nameInput.style.width = "100%";
-    nameInput.style.padding = "5px 8px";
-    nameInput.style.borderRadius = "6px";
+    nameInput.style.padding = "4px 8px";
+    nameInput.style.borderRadius = "5px";
     nameInput.style.border = "1px solid #374151";
-    nameInput.style.background = "#141519";
+    nameInput.style.background = "#1e1f24";
     nameInput.style.color = "#f3f4f6";
     nameInput.style.fontSize = "11px";
     nameInput.style.outline = "none";
@@ -932,11 +1180,11 @@ async function renderPopoverUI() {
     const pickerInput = document.createElement("input");
     pickerInput.type = "color";
     pickerInput.value = activeHex;
-    pickerInput.style.width = "28px";
-    pickerInput.style.height = "26px";
+    pickerInput.style.width = "26px";
+    pickerInput.style.height = "24px";
     pickerInput.style.padding = "0";
     pickerInput.style.border = "1px solid #374151";
-    pickerInput.style.borderRadius = "6px";
+    pickerInput.style.borderRadius = "5px";
     pickerInput.style.background = "transparent";
     pickerInput.style.cursor = "pointer";
 
@@ -946,10 +1194,10 @@ async function renderPopoverUI() {
     hexInput.placeholder = "#06b6d4";
     hexInput.style.flex = "1";
     hexInput.style.minWidth = "0";
-    hexInput.style.padding = "5px 8px";
-    hexInput.style.borderRadius = "6px";
+    hexInput.style.padding = "4px 7px";
+    hexInput.style.borderRadius = "5px";
     hexInput.style.border = "1px solid #374151";
-    hexInput.style.background = "#141519";
+    hexInput.style.background = "#1e1f24";
     hexInput.style.color = "#f3f4f6";
     hexInput.style.fontSize = "11px";
     hexInput.style.fontFamily = "monospace";
@@ -982,8 +1230,8 @@ async function renderPopoverUI() {
 
     const saveBtn = document.createElement("button");
     saveBtn.textContent = "Save";
-    saveBtn.style.padding = "5px 10px";
-    saveBtn.style.borderRadius = "6px";
+    saveBtn.style.padding = "4px 10px";
+    saveBtn.style.borderRadius = "5px";
     saveBtn.style.border = "none";
     saveBtn.style.background = "#3b82f6";
     saveBtn.style.color = "#ffffff";
@@ -992,61 +1240,43 @@ async function renderPopoverUI() {
     saveBtn.style.cursor = "pointer";
 
     hexRow.append(pickerInput, hexInput, saveBtn);
-    customSection.append(opacityRow, nameInput, hexRow);
+    colorPropsBox.append(
+      opacityCtrl.row,
+      rimCtrl.row,
+      wobbleCtrl.row,
+      nameInput,
+      hexRow
+    );
 
-    // --- TARGET AURA RADIUS SLIDER ---
-    const radiusRow = document.createElement("div");
-    radiusRow.style.display = "flex";
-    radiusRow.style.flexDirection = "column";
-    radiusRow.style.gap = "4px";
-    radiusRow.style.padding = "5px 8px";
-    radiusRow.style.marginBottom = "6px";
-    radiusRow.style.borderRadius = "6px";
-    radiusRow.style.background = "#141519";
-    radiusRow.style.border = "1px solid #2e3038";
+    // --- TARGET AURA RADIUS & HIDDEN TOGGLE ---
+    const targetPropsBox = document.createElement("div");
+    targetPropsBox.style.padding = "6px 8px";
+    targetPropsBox.style.marginBottom = "7px";
+    targetPropsBox.style.borderRadius = "6px";
+    targetPropsBox.style.background = "#141519";
+    targetPropsBox.style.border = "1px solid #2e3038";
+    targetPropsBox.style.display = "flex";
+    targetPropsBox.style.flexDirection = "column";
+    targetPropsBox.style.gap = "6px";
 
-    const radiusTopRow = document.createElement("div");
-    radiusTopRow.style.display = "flex";
-    radiusTopRow.style.justifyContent = "space-between";
-    radiusTopRow.style.alignItems = "center";
+    const radiusCtrl = createCompactSlider(
+      "Aura Radius (Size-Scaled)",
+      MIN_RADIUS_MULTIPLIER,
+      MAX_RADIUS_MULTIPLIER,
+      0.05,
+      selectionRadiusMultiplier,
+      (v) => `${v.toFixed(2)} sq`
+    );
 
-    const radiusLabel = document.createElement("span");
-    radiusLabel.style.fontSize = "11px";
-    radiusLabel.style.color = "#d1d5db";
-    radiusLabel.textContent = "Aura Radius (Size-Scaled)";
-
-    const radiusValueTag = document.createElement("span");
-    radiusValueTag.style.fontSize = "11px";
-    radiusValueTag.style.fontFamily = "monospace";
-    radiusValueTag.style.color = "#93c5fd";
-    radiusValueTag.textContent = `${selectionRadiusMultiplier.toFixed(2)} sq`;
-
-    const radiusSlider = document.createElement("input");
-    radiusSlider.type = "range";
-    radiusSlider.className = "goo-slider";
-    radiusSlider.min = String(MIN_RADIUS_MULTIPLIER);
-    radiusSlider.max = String(MAX_RADIUS_MULTIPLIER);
-    radiusSlider.step = "0.05";
-    radiusSlider.value = String(selectionRadiusMultiplier);
-
-    radiusTopRow.append(radiusLabel, radiusValueTag);
-    radiusRow.append(radiusTopRow, radiusSlider);
-
-    // --- HIDDEN TOKEN VISIBILITY TOGGLE ---
     const hiddenToggleRow = document.createElement("label");
     hiddenToggleRow.style.display = "flex";
     hiddenToggleRow.style.alignItems = "center";
     hiddenToggleRow.style.justifyContent = "space-between";
     hiddenToggleRow.style.gap = "8px";
-    hiddenToggleRow.style.padding = "6px 8px";
-    hiddenToggleRow.style.marginBottom = "8px";
-    hiddenToggleRow.style.borderRadius = "6px";
-    hiddenToggleRow.style.background = "#141519";
-    hiddenToggleRow.style.border = "1px solid #2e3038";
     hiddenToggleRow.style.cursor = "pointer";
 
     const hiddenToggleText = document.createElement("span");
-    hiddenToggleText.style.fontSize = "11px";
+    hiddenToggleText.style.fontSize = "10.5px";
     hiddenToggleText.style.color = "#d1d5db";
     hiddenToggleText.textContent = "Keep goo when token is hidden";
 
@@ -1057,6 +1287,7 @@ async function renderPopoverUI() {
     hiddenCheckbox.style.margin = "0";
 
     hiddenToggleRow.append(hiddenToggleText, hiddenCheckbox);
+    targetPropsBox.append(radiusCtrl.row, hiddenToggleRow);
 
     // --- REMOVE / HIDE GOO BUTTON ---
     const removeBtn = document.createElement("button");
@@ -1070,14 +1301,35 @@ async function renderPopoverUI() {
     removeBtn.style.fontWeight = "600";
     removeBtn.style.cursor = "pointer";
 
-    function syncEditorInputs(hex: string, opacity: number) {
+    window.addEventListener("pointerup", () => {
+      isDraggingAnySlider = false;
+    });
+
+    function syncEditorInputs(
+      hex: string,
+      opacity: number,
+      rim: number,
+      wobble: number
+    ) {
       activeHex = hex;
-      activeOpacity = clampOpacity(opacity);
+      activeOpacity = clampUnit(opacity, DEFAULT_OPACITY);
+      activeRim = clampUnit(rim, DEFAULT_RIM);
+      activeWobble = clampUnit(wobble, DEFAULT_WOBBLE);
+
       pickerInput.value = hex;
       hexInput.value = hex;
-      const pct = Math.round(activeOpacity * 100);
-      opacitySlider.value = String(pct);
-      opacityValueTag.textContent = `${pct}%`;
+
+      const opPct = Math.round(activeOpacity * 100);
+      opacityCtrl.slider.value = String(opPct);
+      opacityCtrl.valueTag.textContent = `${opPct}%`;
+
+      const rimPct = Math.round(activeRim * 100);
+      rimCtrl.slider.value = String(rimPct);
+      rimCtrl.valueTag.textContent = `${rimPct}%`;
+
+      const wobPct = Math.round(activeWobble * 100);
+      wobbleCtrl.slider.value = String(wobPct);
+      wobbleCtrl.valueTag.textContent = `${wobPct}%`;
     }
 
     function updateFooterControls() {
@@ -1085,9 +1337,9 @@ async function renderPopoverUI() {
         removeBtn.textContent = "Remove Goo from Selected";
         colorSectionLabel.textContent = "Apply Color to Selected Tokens";
         hiddenCheckbox.checked = selectionKeepWhenHidden;
-        if (!isDraggingRadius) {
-          radiusSlider.value = String(selectionRadiusMultiplier);
-          radiusValueTag.textContent = `${selectionRadiusMultiplier.toFixed(2)} sq`;
+        if (!isDraggingAnySlider) {
+          radiusCtrl.slider.value = String(selectionRadiusMultiplier);
+          radiusCtrl.valueTag.textContent = `${selectionRadiusMultiplier.toFixed(2)} sq`;
         }
       } else {
         const grp = getSavedGroups().find((g) => g.id === activeTarget);
@@ -1096,9 +1348,9 @@ async function renderPopoverUI() {
         removeBtn.textContent = `Turn Off Goo for "${label}"`;
         colorSectionLabel.textContent = `Apply Color to "${label}"`;
         hiddenCheckbox.checked = Boolean(grp?.keepWhenHidden);
-        if (!isDraggingRadius) {
-          radiusSlider.value = String(rad);
-          radiusValueTag.textContent = `${rad.toFixed(2)} sq`;
+        if (!isDraggingAnySlider) {
+          radiusCtrl.slider.value = String(rad);
+          radiusCtrl.valueTag.textContent = `${rad.toFixed(2)} sq`;
         }
       }
     }
@@ -1111,8 +1363,12 @@ async function renderPopoverUI() {
         const grp = getSavedGroups().find((g) => g.id === target);
         if (grp) {
           const parsed = parseRgbaHex(grp.rgbaHex);
-          syncEditorInputs(parsed.hex, parsed.opacity);
-          setDefaultRgbaHex(grp.rgbaHex);
+          syncEditorInputs(parsed.hex, parsed.opacity, grp.rim, grp.wobble);
+          setDefaultStyle({
+            rgbaHex: grp.rgbaHex,
+            rim: grp.rim,
+            wobble: grp.wobble,
+          });
           setDefaultRadiusMultiplier(grp.radiusMultiplier);
           const matchingPreset = getSavedColors().find(
             (c) =>
@@ -1128,24 +1384,37 @@ async function renderPopoverUI() {
       rebuildSwatches();
     }
 
-    // Live Radius Slider
-    let lastRadiusPush = 0;
-    let radiusTimer: number | undefined;
+    const groupRowElements = new Map<string, HTMLDivElement>();
 
-    async function commitRadiusChange(mult: number) {
+    function updateGroupRowHighlights() {
+      groupRowElements.forEach((el, id) => {
+        const isActive = id === activeTarget;
+        el.style.borderColor = isActive ? "#3b82f6" : "#2e3038";
+        el.style.background = isActive ? "#262b38" : "#141519";
+      });
+    }
+
+    async function applyStyleToTarget(
+      rgbaHex: string,
+      rim: number,
+      wobble: number
+    ) {
       if ((await OBR.player.getRole()) !== "GM") return;
-      const clamped = clampRadiusMultiplier(mult);
-      setDefaultRadiusMultiplier(clamped);
 
       if (activeTarget === "selection") {
-        selectionRadiusMultiplier = clamped;
         const selection = await OBR.player.getSelection();
         if (!selection || selection.length === 0) return;
 
         await OBR.scene.items.updateItems(selection, (items) => {
           for (const item of items) {
             if (isImage(item) && item.layer === "CHARACTER") {
-              item.metadata[RADIUS_META_KEY] = clamped;
+              item.metadata[META_KEY] = true;
+              item.metadata[COLOR_META_KEY] = rgbaHex;
+              item.metadata[RIM_META_KEY] = rim;
+              item.metadata[WOBBLE_META_KEY] = wobble;
+              if (typeof item.metadata[RADIUS_META_KEY] !== "number") {
+                item.metadata[RADIUS_META_KEY] = selectionRadiusMultiplier;
+              }
             }
           }
         });
@@ -1153,7 +1422,9 @@ async function renderPopoverUI() {
         const groups = getSavedGroups();
         const targetGroup = groups.find((g) => g.id === activeTarget);
         if (targetGroup) {
-          targetGroup.radiusMultiplier = clamped;
+          targetGroup.rgbaHex = rgbaHex;
+          targetGroup.rim = rim;
+          targetGroup.wobble = wobble;
           saveGroups(groups);
         }
 
@@ -1168,42 +1439,233 @@ async function renderPopoverUI() {
         if (groupTokenIds.length > 0) {
           await OBR.scene.items.updateItems(groupTokenIds, (items) => {
             for (const item of items) {
-              item.metadata[RADIUS_META_KEY] = clamped;
+              item.metadata[META_KEY] = true;
+              item.metadata[COLOR_META_KEY] = rgbaHex;
+              item.metadata[RIM_META_KEY] = rim;
+              item.metadata[WOBBLE_META_KEY] = wobble;
+              item.metadata[RADIUS_META_KEY] =
+                targetGroup?.radiusMultiplier ?? DEFAULT_RADIUS_MULTIPLIER;
+              if (targetGroup?.keepWhenHidden) {
+                item.metadata[KEEP_WHEN_HIDDEN_META_KEY] = true;
+              } else {
+                delete item.metadata[KEEP_WHEN_HIDDEN_META_KEY];
+              }
             }
           });
         }
+
+        rebuildGroups();
       }
     }
 
-    radiusSlider.addEventListener("pointerdown", () => {
-      isDraggingRadius = true;
-    });
-    window.addEventListener("pointerup", () => {
-      isDraggingRadius = false;
-    });
+    function bindThrottledSlider(
+      sliderEl: HTMLInputElement,
+      tagEl: HTMLSpanElement,
+      formatFn: (v: number) => string,
+      onCommit: (v: number) => void
+    ) {
+      let lastPush = 0;
+      let timer: number | undefined;
 
-    radiusSlider.addEventListener("input", () => {
-      const val = clampRadiusMultiplier(Number(radiusSlider.value));
-      radiusValueTag.textContent = `${val.toFixed(2)} sq`;
+      sliderEl.addEventListener("pointerdown", () => {
+        isDraggingAnySlider = true;
+      });
 
-      const now = Date.now();
-      if (now - lastRadiusPush >= 45) {
-        lastRadiusPush = now;
-        commitRadiusChange(val);
-      } else {
-        window.clearTimeout(radiusTimer);
-        radiusTimer = window.setTimeout(() => {
-          lastRadiusPush = Date.now();
-          commitRadiusChange(val);
-        }, 45);
+      sliderEl.addEventListener("input", () => {
+        const val = Number(sliderEl.value);
+        tagEl.textContent = formatFn(val);
+
+        const now = Date.now();
+        if (now - lastPush >= 45) {
+          lastPush = now;
+          onCommit(val);
+        } else {
+          window.clearTimeout(timer);
+          timer = window.setTimeout(() => {
+            lastPush = Date.now();
+            onCommit(val);
+          }, 45);
+        }
+      });
+
+      sliderEl.addEventListener("change", () => {
+        isDraggingAnySlider = false;
+        window.clearTimeout(timer);
+        onCommit(Number(sliderEl.value));
+      });
+    }
+
+    // 1. Color Opacity Slider
+    bindThrottledSlider(
+      opacityCtrl.slider,
+      opacityCtrl.valueTag,
+      (v) => `${Math.round(v)}%`,
+      async (pct) => {
+        const nextOpacity = clampUnit(pct / 100, DEFAULT_OPACITY);
+        activeOpacity = nextOpacity;
+        const rgbaHex = formatRgbaHex(activeHex, nextOpacity);
+        setDefaultStyle({ rgbaHex });
+
+        if (editingColorId) {
+          const allColors = getSavedColors();
+          const targetColor = allColors.find((c) => c.id === editingColorId);
+          if (targetColor) {
+            if (targetColor.builtIn) {
+              saveBuiltInOverride(targetColor.id, { opacity: nextOpacity });
+            } else {
+              targetColor.opacity = nextOpacity;
+              saveCustomColors(allColors);
+            }
+            rebuildSwatches();
+          }
+        }
+
+        await applyStyleToTarget(rgbaHex, activeRim, activeWobble);
       }
-    });
+    );
 
-    radiusSlider.addEventListener("change", () => {
-      isDraggingRadius = false;
-      window.clearTimeout(radiusTimer);
-      commitRadiusChange(Number(radiusSlider.value));
-    });
+    // 2. Edge Highlight Slider (per color)
+    bindThrottledSlider(
+      rimCtrl.slider,
+      rimCtrl.valueTag,
+      (v) => `${Math.round(v)}%`,
+      async (pct) => {
+        const nextRim = clampUnit(pct / 100, DEFAULT_RIM);
+        activeRim = nextRim;
+        const rgbaHex = formatRgbaHex(activeHex, activeOpacity);
+        setDefaultStyle({ rim: nextRim });
+
+        if (editingColorId) {
+          const allColors = getSavedColors();
+          const targetColor = allColors.find((c) => c.id === editingColorId);
+          if (targetColor) {
+            if (targetColor.builtIn) {
+              saveBuiltInOverride(targetColor.id, { rim: nextRim });
+            } else {
+              targetColor.rim = nextRim;
+              saveCustomColors(allColors);
+            }
+            rebuildSwatches();
+          }
+        }
+
+        await applyStyleToTarget(rgbaHex, nextRim, activeWobble);
+      }
+    );
+
+    // 3. Organic Wobble Slider (per color AND per token/group)
+    bindThrottledSlider(
+      wobbleCtrl.slider,
+      wobbleCtrl.valueTag,
+      (v) => `${Math.round(v)}%`,
+      async (pct) => {
+        const nextWobble = clampUnit(pct / 100, DEFAULT_WOBBLE);
+        activeWobble = nextWobble;
+        setDefaultStyle({ wobble: nextWobble });
+
+        if (editingColorId) {
+          const allColors = getSavedColors();
+          const targetColor = allColors.find((c) => c.id === editingColorId);
+          if (targetColor) {
+            if (targetColor.builtIn) {
+              saveBuiltInOverride(targetColor.id, { wobble: nextWobble });
+            } else {
+              targetColor.wobble = nextWobble;
+              saveCustomColors(allColors);
+            }
+            rebuildSwatches();
+          }
+        }
+
+        if ((await OBR.player.getRole()) !== "GM") return;
+
+        // Apply wobble directly to the active target (without overwriting other token properties)
+        if (activeTarget === "selection") {
+          const selection = await OBR.player.getSelection();
+          if (!selection || selection.length === 0) return;
+
+          await OBR.scene.items.updateItems(selection, (items) => {
+            for (const item of items) {
+              if (isImage(item) && item.layer === "CHARACTER") {
+                item.metadata[WOBBLE_META_KEY] = nextWobble;
+              }
+            }
+          });
+        } else {
+          const groups = getSavedGroups();
+          const targetGroup = groups.find((g) => g.id === activeTarget);
+          if (targetGroup) {
+            targetGroup.wobble = nextWobble;
+            saveGroups(groups);
+          }
+
+          const allItems = await OBR.scene.items.getItems();
+          const groupTokenIds = allItems
+            .filter(
+              (item) =>
+                isImage(item) && item.metadata[GROUP_META_KEY] === activeTarget
+            )
+            .map((item) => item.id);
+
+          if (groupTokenIds.length > 0) {
+            await OBR.scene.items.updateItems(groupTokenIds, (items) => {
+              for (const item of items) {
+                item.metadata[WOBBLE_META_KEY] = nextWobble;
+              }
+            });
+          }
+        }
+      }
+    );
+
+    // 4. Aura Radius Slider
+    bindThrottledSlider(
+      radiusCtrl.slider,
+      radiusCtrl.valueTag,
+      (v) => `${v.toFixed(2)} sq`,
+      async (val) => {
+        if ((await OBR.player.getRole()) !== "GM") return;
+        const clamped = clampRadiusMultiplier(val);
+        setDefaultRadiusMultiplier(clamped);
+
+        if (activeTarget === "selection") {
+          selectionRadiusMultiplier = clamped;
+          const selection = await OBR.player.getSelection();
+          if (!selection || selection.length === 0) return;
+
+          await OBR.scene.items.updateItems(selection, (items) => {
+            for (const item of items) {
+              if (isImage(item) && item.layer === "CHARACTER") {
+                item.metadata[RADIUS_META_KEY] = clamped;
+              }
+            }
+          });
+        } else {
+          const groups = getSavedGroups();
+          const targetGroup = groups.find((g) => g.id === activeTarget);
+          if (targetGroup) {
+            targetGroup.radiusMultiplier = clamped;
+            saveGroups(groups);
+          }
+
+          const allItems = await OBR.scene.items.getItems();
+          const groupTokenIds = allItems
+            .filter(
+              (item) =>
+                isImage(item) && item.metadata[GROUP_META_KEY] === activeTarget
+            )
+            .map((item) => item.id);
+
+          if (groupTokenIds.length > 0) {
+            await OBR.scene.items.updateItems(groupTokenIds, (items) => {
+              for (const item of items) {
+                item.metadata[RADIUS_META_KEY] = clamped;
+              }
+            });
+          }
+        }
+      }
+    );
 
     hiddenCheckbox.addEventListener("change", async () => {
       if ((await OBR.player.getRole()) !== "GM") return;
@@ -1255,119 +1717,6 @@ async function renderPopoverUI() {
       }
     });
 
-    const groupRowElements = new Map<string, HTMLDivElement>();
-
-    function updateGroupRowHighlights() {
-      groupRowElements.forEach((el, id) => {
-        const isActive = id === activeTarget;
-        el.style.borderColor = isActive ? "#3b82f6" : "#2e3038";
-        el.style.background = isActive ? "#262b38" : "#141519";
-      });
-    }
-
-    async function applyRgbaToTarget(rgbaHex: string) {
-      if ((await OBR.player.getRole()) !== "GM") return;
-
-      if (activeTarget === "selection") {
-        const selection = await OBR.player.getSelection();
-        if (!selection || selection.length === 0) return;
-
-        await OBR.scene.items.updateItems(selection, (items) => {
-          for (const item of items) {
-            if (isImage(item) && item.layer === "CHARACTER") {
-              item.metadata[META_KEY] = true;
-              item.metadata[COLOR_META_KEY] = rgbaHex;
-              if (typeof item.metadata[RADIUS_META_KEY] !== "number") {
-                item.metadata[RADIUS_META_KEY] = selectionRadiusMultiplier;
-              }
-            }
-          }
-        });
-      } else {
-        const groups = getSavedGroups();
-        const targetGroup = groups.find((g) => g.id === activeTarget);
-        if (targetGroup) {
-          targetGroup.rgbaHex = rgbaHex;
-          saveGroups(groups);
-        }
-
-        const allItems = await OBR.scene.items.getItems();
-        const groupTokenIds = allItems
-          .filter(
-            (item) =>
-              isImage(item) && item.metadata[GROUP_META_KEY] === activeTarget
-          )
-          .map((item) => item.id);
-
-        if (groupTokenIds.length > 0) {
-          await OBR.scene.items.updateItems(groupTokenIds, (items) => {
-            for (const item of items) {
-              item.metadata[META_KEY] = true;
-              item.metadata[COLOR_META_KEY] = rgbaHex;
-              item.metadata[RADIUS_META_KEY] =
-                targetGroup?.radiusMultiplier ?? DEFAULT_RADIUS_MULTIPLIER;
-              if (targetGroup?.keepWhenHidden) {
-                item.metadata[KEEP_WHEN_HIDDEN_META_KEY] = true;
-              } else {
-                delete item.metadata[KEEP_WHEN_HIDDEN_META_KEY];
-              }
-            }
-          });
-        }
-
-        rebuildGroups();
-      }
-    }
-
-    // Live opacity slider updates both the active color preset and the map target
-    let lastOpacityPush = 0;
-    let opacityTimer: number | undefined;
-
-    async function commitOpacityChange(pct: number) {
-      const nextOpacity = clampOpacity(pct / 100);
-      activeOpacity = nextOpacity;
-      const rgbaHex = formatRgbaHex(activeHex, nextOpacity);
-      setDefaultRgbaHex(rgbaHex);
-
-      if (editingColorId) {
-        const allColors = getSavedColors();
-        const targetColor = allColors.find((c) => c.id === editingColorId);
-        if (targetColor) {
-          if (targetColor.builtIn) {
-            saveBuiltInOpacity(targetColor.id, nextOpacity);
-          } else {
-            targetColor.opacity = nextOpacity;
-            saveCustomColors(allColors);
-          }
-          rebuildSwatches();
-        }
-      }
-
-      await applyRgbaToTarget(rgbaHex);
-    }
-
-    opacitySlider.addEventListener("input", () => {
-      const pct = Number(opacitySlider.value);
-      opacityValueTag.textContent = `${pct}%`;
-
-      const now = Date.now();
-      if (now - lastOpacityPush >= 45) {
-        lastOpacityPush = now;
-        commitOpacityChange(pct);
-      } else {
-        window.clearTimeout(opacityTimer);
-        opacityTimer = window.setTimeout(() => {
-          lastOpacityPush = Date.now();
-          commitOpacityChange(pct);
-        }, 45);
-      }
-    });
-
-    opacitySlider.addEventListener("change", () => {
-      window.clearTimeout(opacityTimer);
-      commitOpacityChange(Number(opacitySlider.value));
-    });
-
     async function assignSelectionToGroup(group: SavedGooGroup) {
       if ((await OBR.player.getRole()) !== "GM") return;
 
@@ -1380,6 +1729,8 @@ async function renderPopoverUI() {
             item.metadata[GROUP_META_KEY] = group.id;
             item.metadata[META_KEY] = true;
             item.metadata[COLOR_META_KEY] = group.rgbaHex;
+            item.metadata[RIM_META_KEY] = group.rim;
+            item.metadata[WOBBLE_META_KEY] = group.wobble;
             item.metadata[RADIUS_META_KEY] = group.radiusMultiplier;
             if (group.keepWhenHidden) {
               item.metadata[KEEP_WHEN_HIDDEN_META_KEY] = true;
@@ -1412,7 +1763,7 @@ async function renderPopoverUI() {
       selRow.style.display = "flex";
       selRow.style.alignItems = "center";
       selRow.style.justifyContent = "space-between";
-      selRow.style.padding = "5px 8px";
+      selRow.style.padding = "4px 8px";
       selRow.style.borderRadius = "6px";
       selRow.style.border = "1px solid #2e3038";
       selRow.style.cursor = "pointer";
@@ -1442,13 +1793,12 @@ async function renderPopoverUI() {
         row.style.display = "flex";
         row.style.alignItems = "center";
         row.style.gap = "5px";
-        row.style.padding = "4px 6px";
+        row.style.padding = "3px 6px";
         row.style.borderRadius = "6px";
         row.style.border = "1px solid #2e3038";
         row.style.cursor = "pointer";
         row.style.flexShrink = "0";
 
-        // Color swatch dot
         const colorDot = document.createElement("span");
         colorDot.style.width = "10px";
         colorDot.style.height = "10px";
@@ -1458,7 +1808,6 @@ async function renderPopoverUI() {
         colorDot.style.flexShrink = "0";
         colorDot.style.border = "1px solid rgba(255,255,255,0.45)";
 
-        // Inline editable group name
         const groupNameInput = document.createElement("input");
         groupNameInput.type = "text";
         groupNameInput.className = "goo-group-name-input";
@@ -1496,7 +1845,6 @@ async function renderPopoverUI() {
           }
         });
 
-        // Token count badge
         const countBadge = document.createElement("span");
         const count = groupCounts[group.id] ?? 0;
         countBadge.textContent = String(count);
@@ -1509,7 +1857,6 @@ async function renderPopoverUI() {
         countBadge.style.borderRadius = "999px";
         countBadge.style.flexShrink = "0";
 
-        // Assign selected tokens button
         const assignBtn = document.createElement("button");
         assignBtn.textContent = "+Assign";
         assignBtn.title = `Assign selected map tokens to ${group.name}`;
@@ -1528,7 +1875,6 @@ async function renderPopoverUI() {
           await assignSelectionToGroup(group);
         });
 
-        // Select group tokens on map button
         const selectBtn = document.createElement("button");
         selectBtn.textContent = "Sel";
         selectBtn.title = `Select all ${group.name} tokens on the map`;
@@ -1599,6 +1945,8 @@ async function renderPopoverUI() {
         id: `group-${Date.now()}`,
         name: `Group ${nextNum}`,
         rgbaHex: formatRgbaHex(activeHex, activeOpacity),
+        rim: activeRim,
+        wobble: activeWobble,
         radiusMultiplier: getDefaultRadiusMultiplier(),
         keepWhenHidden: false,
       };
@@ -1613,7 +1961,7 @@ async function renderPopoverUI() {
       colorList.replaceChildren();
 
       colors.forEach((preset) => {
-        const pct = Math.round(preset.opacity * 100);
+        const opPct = Math.round(preset.opacity * 100);
         const isSelected =
           editingColorId === preset.id ||
           (editingColorId === null && preset.hex === activeHex);
@@ -1626,15 +1974,15 @@ async function renderPopoverUI() {
         row.style.flexShrink = "0";
 
         const btn = document.createElement("button");
-        btn.title = `${preset.name} (${preset.hex} · ${pct}% opacity)`;
+        btn.title = `${preset.name} (${preset.hex} · ${opPct}% opacity · ${Math.round(preset.rim * 100)}% edge · ${Math.round(preset.wobble * 100)}% wobble)`;
         btn.style.flex = "1";
         btn.style.minWidth = "0";
-        btn.style.height = "28px";
+        btn.style.height = "26px";
         btn.style.borderRadius = "6px";
         btn.style.border = "none";
         btn.style.background = preset.hex;
         btn.style.cursor = "pointer";
-        btn.style.padding = "0 10px";
+        btn.style.padding = "0 9px";
         btn.style.display = "flex";
         btn.style.alignItems = "center";
         btn.style.justifyContent = "space-between";
@@ -1655,23 +2003,27 @@ async function renderPopoverUI() {
         nameLabel.textContent = preset.name;
 
         const metaTag = document.createElement("span");
-        metaTag.style.fontSize = "10px";
+        metaTag.style.fontSize = "9.5px";
         metaTag.style.fontFamily = "monospace";
-        metaTag.style.color = "rgba(255,255,255,0.9)";
+        metaTag.style.color = "rgba(255,255,255,0.92)";
         metaTag.style.textShadow = "0 1px 2px rgba(0,0,0,0.8)";
         metaTag.style.flexShrink = "0";
-        metaTag.textContent = `${preset.hex.toUpperCase()} · ${pct}%`;
+        metaTag.textContent = `${preset.hex.toUpperCase()} · ${opPct}%`;
 
         btn.append(nameLabel, metaTag);
 
         btn.addEventListener("click", async () => {
           editingColorId = preset.id;
           nameInput.value = "";
-          syncEditorInputs(preset.hex, preset.opacity);
+          syncEditorInputs(preset.hex, preset.opacity, preset.rim, preset.wobble);
           const rgbaHex = formatRgbaHex(preset.hex, preset.opacity);
-          setDefaultRgbaHex(rgbaHex);
+          setDefaultStyle({
+            rgbaHex,
+            rim: preset.rim,
+            wobble: preset.wobble,
+          });
           rebuildSwatches();
-          await applyRgbaToTarget(rgbaHex);
+          await applyStyleToTarget(rgbaHex, preset.rim, preset.wobble);
         });
 
         row.appendChild(btn);
@@ -1681,7 +2033,7 @@ async function renderPopoverUI() {
           delBtn.title = "Delete saved color";
           delBtn.textContent = "×";
           delBtn.style.width = "24px";
-          delBtn.style.height = "28px";
+          delBtn.style.height = "26px";
           delBtn.style.flexShrink = "0";
           delBtn.style.borderRadius = "6px";
           delBtn.style.border = "1px solid #374151";
@@ -1701,8 +2053,17 @@ async function renderPopoverUI() {
             if (editingColorId === preset.id) {
               const fallback = STARTING_COLORS[0];
               editingColorId = fallback.id;
-              syncEditorInputs(fallback.hex, fallback.opacity);
-              setDefaultRgbaHex(formatRgbaHex(fallback.hex, fallback.opacity));
+              syncEditorInputs(
+                fallback.hex,
+                fallback.opacity,
+                fallback.rim,
+                fallback.wobble
+              );
+              setDefaultStyle({
+                rgbaHex: formatRgbaHex(fallback.hex, fallback.opacity),
+                rim: fallback.rim,
+                wobble: fallback.wobble,
+              });
             }
             rebuildSwatches();
           });
@@ -1731,17 +2092,19 @@ async function renderPopoverUI() {
         name: customName,
         hex: norm,
         opacity: activeOpacity,
+        rim: activeRim,
+        wobble: activeWobble,
       };
 
       saveCustomColors([...existingCustom, newEntry]);
       nameInput.value = "";
       editingColorId = newId;
-      syncEditorInputs(norm, activeOpacity);
+      syncEditorInputs(norm, activeOpacity, activeRim, activeWobble);
       const rgbaHex = formatRgbaHex(norm, activeOpacity);
-      setDefaultRgbaHex(rgbaHex);
+      setDefaultStyle({ rgbaHex, rim: activeRim, wobble: activeWobble });
       rebuildSwatches();
       colorList.scrollTop = colorList.scrollHeight;
-      await applyRgbaToTarget(rgbaHex);
+      await applyStyleToTarget(rgbaHex, activeRim, activeWobble);
     });
 
     removeBtn.addEventListener("click", async () => {
@@ -1755,6 +2118,8 @@ async function renderPopoverUI() {
           for (const item of items) {
             delete item.metadata[META_KEY];
             delete item.metadata[COLOR_META_KEY];
+            delete item.metadata[RIM_META_KEY];
+            delete item.metadata[WOBBLE_META_KEY];
             delete item.metadata[RADIUS_META_KEY];
             delete item.metadata[GROUP_META_KEY];
             delete item.metadata[KEEP_WHEN_HIDDEN_META_KEY];
@@ -1794,6 +2159,7 @@ async function renderPopoverUI() {
         const counts: Record<string, number> = {};
         let anySelectedKeep = false;
         let foundSelectedRadius: number | null = null;
+        let foundSelectedWobble: number | null = null;
 
         for (const item of items) {
           if (isImage(item)) {
@@ -1813,6 +2179,15 @@ async function renderPopoverUI() {
                   item.metadata[RADIUS_META_KEY]
                 );
               }
+              if (
+                foundSelectedWobble === null &&
+                typeof item.metadata[WOBBLE_META_KEY] === "number"
+              ) {
+                foundSelectedWobble = clampUnit(
+                  item.metadata[WOBBLE_META_KEY],
+                  DEFAULT_WOBBLE
+                );
+              }
             }
           }
         }
@@ -1820,6 +2195,16 @@ async function renderPopoverUI() {
         selectionKeepWhenHidden = anySelectedKeep;
         if (foundSelectedRadius !== null) {
           selectionRadiusMultiplier = foundSelectedRadius;
+        }
+        if (
+          activeTarget === "selection" &&
+          foundSelectedWobble !== null &&
+          !isDraggingAnySlider
+        ) {
+          activeWobble = foundSelectedWobble;
+          const wobPct = Math.round(activeWobble * 100);
+          wobbleCtrl.slider.value = String(wobPct);
+          wobbleCtrl.valueTag.textContent = `${wobPct}%`;
         }
       }
 
@@ -1841,9 +2226,8 @@ async function renderPopoverUI() {
       groupList,
       colorSectionLabel,
       colorList,
-      customSection,
-      radiusRow,
-      hiddenToggleRow,
+      colorPropsBox,
+      targetPropsBox,
       removeBtn
     );
     document.body.replaceChildren(container);
