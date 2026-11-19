@@ -12,12 +12,14 @@ const COLOR_META_KEY = `${EXTENSION_ID}/color`;
 const GROUP_META_KEY = `${EXTENSION_ID}/group`;
 const KEEP_WHEN_HIDDEN_META_KEY = `${EXTENSION_ID}/keep-when-hidden`;
 const EFFECT_META_KEY = `${EXTENSION_ID}/is-goo-effect`;
+const SCENE_OPACITY_META_KEY = `${EXTENSION_ID}/opacity`;
 
 const TOGGLE_MENU_ID = `${EXTENSION_ID}/toggle`;
 const HIDDEN_BEHAVIOR_MENU_ID = `${EXTENSION_ID}/toggle-hidden-behavior`;
 
 const CUSTOM_COLORS_STORAGE_KEY = `${EXTENSION_ID}/custom-colors`;
 const DEFAULT_COLOR_STORAGE_KEY = `${EXTENSION_ID}/default-hex`;
+const DEFAULT_OPACITY_STORAGE_KEY = `${EXTENSION_ID}/default-opacity`;
 const GROUPS_STORAGE_KEY = `${EXTENSION_ID}/groups`;
 const ACTIVE_TARGET_STORAGE_KEY = `${EXTENSION_ID}/active-target`;
 
@@ -25,10 +27,10 @@ const NUM_MATRICES = 14; // 14 matrices × 3 monsters per matrix = 42 monsters m
 const MAX_TOKENS = NUM_MATRICES * 3;
 const MAX_ACTIVE_PALETTE = 12; // 4 palette matrices × 3 RGB colors = 12 simultaneous colors
 
-// Tweak these to adjust aura size and transparency
+// Tweak these to adjust aura radius and liquid merge stretch
 const AURA_RADIUS_MULTIPLIER = 1.25; // Radius in grid squares
 const SMOOTHNESS_MULTIPLIER = 0.7;   // How far apart blobs stretch to merge
-const GOO_OPACITY = 0.42;            // Transparency (0.0 to 1.0)
+const DEFAULT_OPACITY = 0.42;        // Starting opacity (42%)
 
 interface SavedGooColor {
   id: string;
@@ -133,6 +135,24 @@ ${mergeSteps}
     return half4(col * alpha, alpha);
 }
 `;
+
+function clampOpacity(val: number): number {
+  return Math.min(1, Math.max(0, val));
+}
+
+function getDefaultOpacity(): number {
+  const raw = localStorage.getItem(DEFAULT_OPACITY_STORAGE_KEY);
+  if (raw === null) return DEFAULT_OPACITY;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? clampOpacity(parsed) : DEFAULT_OPACITY;
+}
+
+function setDefaultOpacity(opacity: number) {
+  localStorage.setItem(
+    DEFAULT_OPACITY_STORAGE_KEY,
+    String(clampOpacity(opacity))
+  );
+}
 
 function normalizeHex(input: string): string | null {
   const trimmed = input.trim().replace(/^#/, "");
@@ -247,11 +267,18 @@ async function syncGooEffect() {
     const sceneReady = await OBR.scene.isReady();
     if (!sceneReady) return;
 
-    const [items, localItems, dpi] = await Promise.all([
+    const [items, localItems, dpi, sceneMeta] = await Promise.all([
       OBR.scene.items.getItems(),
       OBR.scene.local.getItems(),
       OBR.scene.grid.getDpi(),
+      OBR.scene.getMetadata(),
     ]);
+
+    const rawOpacity = sceneMeta[SCENE_OPACITY_META_KEY];
+    const opacity =
+      typeof rawOpacity === "number" && Number.isFinite(rawOpacity)
+        ? clampOpacity(rawOpacity)
+        : getDefaultOpacity();
 
     const radius = dpi * AURA_RADIUS_MULTIPLIER;
     const smoothness = dpi * SMOOTHNESS_MULTIPLIER;
@@ -338,7 +365,7 @@ async function syncGooEffect() {
       { name: "uCount", value: tokens.length },
       { name: "uRadius", value: radius },
       { name: "uSmoothness", value: smoothness },
-      { name: "uOpacity", value: GOO_OPACITY },
+      { name: "uOpacity", value: opacity },
     ];
 
     // Pack 3 monsters per 9-element Matrix: [x, y, paletteIndex]
@@ -392,6 +419,18 @@ async function syncGooEffect() {
       syncQueued = false;
       syncGooEffect();
     }
+  }
+}
+
+async function ensureSceneOpacityInitialized() {
+  if ((await OBR.player.getRole()) !== "GM") return;
+  if (!(await OBR.scene.isReady())) return;
+
+  const meta = await OBR.scene.getMetadata();
+  if (typeof meta[SCENE_OPACITY_META_KEY] !== "number") {
+    await OBR.scene.setMetadata({
+      [SCENE_OPACITY_META_KEY]: getDefaultOpacity(),
+    });
   }
 }
 
@@ -551,6 +590,34 @@ async function renderPopoverUI() {
       background: #141519;
       border-color: #3b82f6;
     }
+    .goo-opacity-slider {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100%;
+      height: 4px;
+      border-radius: 999px;
+      background: #2e3038;
+      outline: none;
+      cursor: pointer;
+    }
+    .goo-opacity-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 13px;
+      height: 13px;
+      border-radius: 50%;
+      background: #3b82f6;
+      border: 2px solid #ffffff;
+      cursor: pointer;
+    }
+    .goo-opacity-slider::-moz-range-thumb {
+      width: 13px;
+      height: 13px;
+      border-radius: 50%;
+      background: #3b82f6;
+      border: 2px solid #ffffff;
+      cursor: pointer;
+    }
   `;
   document.head.appendChild(style);
 
@@ -648,11 +715,11 @@ async function renderPopoverUI() {
     groupList.style.display = "flex";
     groupList.style.flexDirection = "column";
     groupList.style.gap = "5px";
-    groupList.style.maxHeight = "148px";
+    groupList.style.maxHeight = "144px";
     groupList.style.overflowY = "auto";
     groupList.style.overflowX = "hidden";
     groupList.style.padding = "1px";
-    groupList.style.marginBottom = "10px";
+    groupList.style.marginBottom = "8px";
 
     // --- COLORS SECTION ---
     const colorSectionLabel = document.createElement("div");
@@ -752,6 +819,82 @@ async function renderPopoverUI() {
 
     hexRow.append(pickerInput, hexInput, saveBtn);
     customSection.append(nameInput, hexRow);
+
+    // --- OPACITY SLIDER ---
+    const opacityBox = document.createElement("div");
+    opacityBox.style.padding = "6px 8px";
+    opacityBox.style.marginBottom = "6px";
+    opacityBox.style.borderRadius = "6px";
+    opacityBox.style.background = "#141519";
+    opacityBox.style.border = "1px solid #2e3038";
+    opacityBox.style.display = "flex";
+    opacityBox.style.flexDirection = "column";
+    opacityBox.style.gap = "5px";
+
+    const opacityTopRow = document.createElement("div");
+    opacityTopRow.style.display = "flex";
+    opacityTopRow.style.justifyContent = "space-between";
+    opacityTopRow.style.alignItems = "center";
+
+    const opacityLabel = document.createElement("span");
+    opacityLabel.style.fontSize = "11px";
+    opacityLabel.style.color = "#d1d5db";
+    opacityLabel.textContent = "Goo Opacity";
+
+    const opacityValueTag = document.createElement("span");
+    opacityValueTag.style.fontSize = "11px";
+    opacityValueTag.style.fontFamily = "monospace";
+    opacityValueTag.style.color = "#93c5fd";
+
+    const initialPct = Math.round(getDefaultOpacity() * 100);
+    opacityValueTag.textContent = `${initialPct}%`;
+
+    const opacitySlider = document.createElement("input");
+    opacitySlider.type = "range";
+    opacitySlider.className = "goo-opacity-slider";
+    opacitySlider.min = "0";
+    opacitySlider.max = "100";
+    opacitySlider.step = "1";
+    opacitySlider.value = String(initialPct);
+
+    opacityTopRow.append(opacityLabel, opacityValueTag);
+    opacityBox.append(opacityTopRow, opacitySlider);
+
+    let lastOpacityPush = 0;
+    let opacityTimer: number | undefined;
+
+    async function pushSceneOpacity(pct: number) {
+      if ((await OBR.player.getRole()) !== "GM") return;
+      const normalized = clampOpacity(pct / 100);
+      setDefaultOpacity(normalized);
+      if (await OBR.scene.isReady()) {
+        await OBR.scene.setMetadata({
+          [SCENE_OPACITY_META_KEY]: normalized,
+        });
+      }
+    }
+
+    opacitySlider.addEventListener("input", () => {
+      const pct = Number(opacitySlider.value);
+      opacityValueTag.textContent = `${pct}%`;
+
+      const now = Date.now();
+      if (now - lastOpacityPush >= 40) {
+        lastOpacityPush = now;
+        pushSceneOpacity(pct);
+      } else {
+        window.clearTimeout(opacityTimer);
+        opacityTimer = window.setTimeout(() => {
+          lastOpacityPush = Date.now();
+          pushSceneOpacity(pct);
+        }, 40);
+      }
+    });
+
+    opacitySlider.addEventListener("change", () => {
+      window.clearTimeout(opacityTimer);
+      pushSceneOpacity(Number(opacitySlider.value));
+    });
 
     // --- HIDDEN TOKEN VISIBILITY TOGGLE ---
     const hiddenToggleRow = document.createElement("label");
@@ -1335,7 +1478,18 @@ async function renderPopoverUI() {
       statusBadge.textContent = `${selectedCount} selected`;
 
       if (sceneReady) {
-        const items = await OBR.scene.items.getItems();
+        const [items, sceneMeta] = await Promise.all([
+          OBR.scene.items.getItems(),
+          OBR.scene.getMetadata(),
+        ]);
+
+        const rawOpacity = sceneMeta[SCENE_OPACITY_META_KEY];
+        if (typeof rawOpacity === "number" && Number.isFinite(rawOpacity)) {
+          const pct = Math.round(clampOpacity(rawOpacity) * 100);
+          opacitySlider.value = String(pct);
+          opacityValueTag.textContent = `${pct}%`;
+        }
+
         const counts: Record<string, number> = {};
         let anySelectedKeep = false;
 
@@ -1376,6 +1530,7 @@ async function renderPopoverUI() {
       colorSectionLabel,
       colorList,
       customSection,
+      opacityBox,
       hiddenToggleRow,
       removeBtn
     );
@@ -1419,13 +1574,19 @@ OBR.onReady(async () => {
   });
 
   if (await OBR.scene.isReady()) {
+    await ensureSceneOpacityInitialized();
     syncGooEffect();
   }
 
-  OBR.scene.onReadyChange((ready) => {
+  OBR.scene.onReadyChange(async (ready) => {
     if (ready) {
+      await ensureSceneOpacityInitialized();
       syncGooEffect();
     }
+  });
+
+  OBR.scene.onMetadataChange(() => {
+    syncGooEffect();
   });
 
   OBR.scene.items.onChange(() => {
