@@ -8,24 +8,24 @@ import OBR, {
 
 const EXTENSION_ID = "com.custom.goo-aura";
 const META_KEY = `${EXTENSION_ID}/enabled`;
-const COLOR_META_KEY = `${EXTENSION_ID}/color`;
+const COLOR_META_KEY = `${EXTENSION_ID}/color`; // Stores "#rrggbbaa"
 const GROUP_META_KEY = `${EXTENSION_ID}/group`;
 const KEEP_WHEN_HIDDEN_META_KEY = `${EXTENSION_ID}/keep-when-hidden`;
 const EFFECT_META_KEY = `${EXTENSION_ID}/is-goo-effect`;
-const SCENE_OPACITY_META_KEY = `${EXTENSION_ID}/opacity`;
 
 const TOGGLE_MENU_ID = `${EXTENSION_ID}/toggle`;
 const HIDDEN_BEHAVIOR_MENU_ID = `${EXTENSION_ID}/toggle-hidden-behavior`;
 
 const CUSTOM_COLORS_STORAGE_KEY = `${EXTENSION_ID}/custom-colors`;
-const DEFAULT_COLOR_STORAGE_KEY = `${EXTENSION_ID}/default-hex`;
-const DEFAULT_OPACITY_STORAGE_KEY = `${EXTENSION_ID}/default-opacity`;
+const BUILTIN_OPACITIES_STORAGE_KEY = `${EXTENSION_ID}/builtin-opacities`;
+const DEFAULT_COLOR_STORAGE_KEY = `${EXTENSION_ID}/default-rgba`;
 const GROUPS_STORAGE_KEY = `${EXTENSION_ID}/groups`;
 const ACTIVE_TARGET_STORAGE_KEY = `${EXTENSION_ID}/active-target`;
 
 const NUM_MATRICES = 14; // 14 matrices × 3 monsters per matrix = 42 monsters max
 const MAX_TOKENS = NUM_MATRICES * 3;
-const MAX_ACTIVE_PALETTE = 12; // 4 palette matrices × 3 RGB colors = 12 simultaneous colors
+const NUM_PALETTE_MATRICES = 6; // 6 matrices × 2 RGBA colors = 12 simultaneous colors
+const MAX_ACTIVE_PALETTE = NUM_PALETTE_MATRICES * 2;
 
 // Tweak these to adjust aura radius and liquid merge stretch
 const AURA_RADIUS_MULTIPLIER = 1.25; // Radius in grid squares
@@ -35,34 +35,40 @@ const DEFAULT_OPACITY = 0.42;        // Starting opacity (42%)
 interface SavedGooColor {
   id: string;
   name: string;
-  hex: string;
+  hex: string;     // "#rrggbb"
+  opacity: number; // 0.0 to 1.0
   builtIn?: boolean;
 }
 
 interface SavedGooGroup {
   id: string;
   name: string;
-  hex: string;
+  rgbaHex: string; // "#rrggbbaa"
   keepWhenHidden?: boolean;
   builtIn?: boolean;
 }
 
 const STARTING_COLORS: SavedGooColor[] = [
-  { id: "builtin-acid",    name: "Acid Green",    hex: "#2ed959", builtIn: true },
-  { id: "builtin-crimson", name: "Crimson Blood", hex: "#ef4444", builtIn: true },
-  { id: "builtin-arcane",  name: "Arcane Purple", hex: "#a855f7", builtIn: true },
+  { id: "builtin-acid",    name: "Acid Green",    hex: "#2ed959", opacity: DEFAULT_OPACITY, builtIn: true },
+  { id: "builtin-crimson", name: "Crimson Blood", hex: "#ef4444", opacity: DEFAULT_OPACITY, builtIn: true },
+  { id: "builtin-arcane",  name: "Arcane Purple", hex: "#a855f7", opacity: DEFAULT_OPACITY, builtIn: true },
 ];
 
 const STARTING_GROUPS: SavedGooGroup[] = [
-  { id: "group-1", name: "Group 1", hex: "#2ed959", keepWhenHidden: false, builtIn: true },
-  { id: "group-2", name: "Group 2", hex: "#ef4444", keepWhenHidden: false, builtIn: true },
-  { id: "group-3", name: "Group 3", hex: "#a855f7", keepWhenHidden: false, builtIn: true },
-  { id: "group-4", name: "Group 4", hex: "#06b6d4", keepWhenHidden: false, builtIn: true },
+  { id: "group-1", name: "Group 1", rgbaHex: "#2ed9596b", keepWhenHidden: false, builtIn: true },
+  { id: "group-2", name: "Group 2", rgbaHex: "#ef44446b", keepWhenHidden: false, builtIn: true },
+  { id: "group-3", name: "Group 3", rgbaHex: "#a855f76b", keepWhenHidden: false, builtIn: true },
+  { id: "group-4", name: "Group 4", rgbaHex: "#06b6d46b", keepWhenHidden: false, builtIn: true },
 ];
 
 const matrixUniforms = Array.from(
   { length: NUM_MATRICES },
   (_, m) => `uniform float3x3 uM${m};`
+).join("\n");
+
+const paletteUniforms = Array.from(
+  { length: NUM_PALETTE_MATRICES },
+  (_, p) => `uniform float3x3 uPal${p};`
 ).join("\n");
 
 // Each row of a 3x3 matrix stores one monster: [x, y, paletteIndex]
@@ -82,7 +88,7 @@ const mergeSteps = slotDefs
     (slot, i) => `
     if (uCount > ${i + 1.5}) {
         float di = length(coord - ${slot.pos}) - uRadius;
-        half3 ci = getPaletteColor(${slot.col});
+        half4 ci = getPaletteColor(${slot.col});
         float h = clamp(0.5 + 0.5 * (di - d) / uSmoothness, 0.0, 1.0);
         d = mix(di, d, h) - uSmoothness * h * (1.0 - h);
         col = mix(ci, col, half(h));
@@ -90,32 +96,36 @@ const mergeSteps = slotDefs
   )
   .join("\n");
 
+// Each 3x3 palette matrix stores 2 RGBA colors across its first 8 floats
+const paletteLookupLines: string[] = [];
+for (let p = 0; p < NUM_PALETTE_MATRICES; p++) {
+  const idx0 = p * 2;
+  const idx1 = p * 2 + 1;
+  paletteLookupLines.push(
+    `    if (idx < ${idx0 + 0.5}) return half4(uPal${p}[0][0], uPal${p}[0][1], uPal${p}[0][2], uPal${p}[1][0]);`
+  );
+  if (idx1 < MAX_ACTIVE_PALETTE - 1) {
+    paletteLookupLines.push(
+      `    if (idx < ${idx1 + 0.5}) return half4(uPal${p}[1][1], uPal${p}[1][2], uPal${p}[2][0], uPal${p}[2][1]);`
+    );
+  } else {
+    paletteLookupLines.push(
+      `    return half4(uPal${p}[1][1], uPal${p}[1][2], uPal${p}[2][0], uPal${p}[2][1]);`
+    );
+  }
+}
+
 const GOO_SKSL = `
 ${matrixUniforms}
 
-uniform float3x3 uPal0;
-uniform float3x3 uPal1;
-uniform float3x3 uPal2;
-uniform float3x3 uPal3;
+${paletteUniforms}
 
 uniform float uCount;
 uniform float uRadius;
 uniform float uSmoothness;
-uniform float uOpacity;
 
-half3 getPaletteColor(float idx) {
-    if (idx < 0.5)  return half3(uPal0[0][0], uPal0[0][1], uPal0[0][2]);
-    if (idx < 1.5)  return half3(uPal0[1][0], uPal0[1][1], uPal0[1][2]);
-    if (idx < 2.5)  return half3(uPal0[2][0], uPal0[2][1], uPal0[2][2]);
-    if (idx < 3.5)  return half3(uPal1[0][0], uPal1[0][1], uPal1[0][2]);
-    if (idx < 4.5)  return half3(uPal1[1][0], uPal1[1][1], uPal1[1][2]);
-    if (idx < 5.5)  return half3(uPal1[2][0], uPal1[2][1], uPal1[2][2]);
-    if (idx < 6.5)  return half3(uPal2[0][0], uPal2[0][1], uPal2[0][2]);
-    if (idx < 7.5)  return half3(uPal2[1][0], uPal2[1][1], uPal2[1][2]);
-    if (idx < 8.5)  return half3(uPal2[2][0], uPal2[2][1], uPal2[2][2]);
-    if (idx < 9.5)  return half3(uPal3[0][0], uPal3[0][1], uPal3[0][2]);
-    if (idx < 10.5) return half3(uPal3[1][0], uPal3[1][1], uPal3[1][2]);
-    return half3(uPal3[2][0], uPal3[2][1], uPal3[2][2]);
+half4 getPaletteColor(float idx) {
+${paletteLookupLines.join("\n")}
 }
 
 half4 main(float2 coord) {
@@ -124,15 +134,15 @@ half4 main(float2 coord) {
     }
 
     float d = length(coord - ${slotDefs[0].pos}) - uRadius;
-    half3 col = getPaletteColor(${slotDefs[0].col});
+    half4 col = getPaletteColor(${slotDefs[0].col});
 ${mergeSteps}
 
-    // Crisp anti-aliased liquid edge
+    // Crisp anti-aliased liquid edge with per-color interpolated opacity
     float mask = 1.0 - smoothstep(-1.5, 1.5, d);
-    float alpha = mask * uOpacity;
+    float alpha = mask * float(col.a);
 
     // Skia requires premultiplied alpha
-    return half4(col * alpha, alpha);
+    return half4(col.rgb * half(alpha), half(alpha));
 }
 `;
 
@@ -140,21 +150,7 @@ function clampOpacity(val: number): number {
   return Math.min(1, Math.max(0, val));
 }
 
-function getDefaultOpacity(): number {
-  const raw = localStorage.getItem(DEFAULT_OPACITY_STORAGE_KEY);
-  if (raw === null) return DEFAULT_OPACITY;
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) ? clampOpacity(parsed) : DEFAULT_OPACITY;
-}
-
-function setDefaultOpacity(opacity: number) {
-  localStorage.setItem(
-    DEFAULT_OPACITY_STORAGE_KEY,
-    String(clampOpacity(opacity))
-  );
-}
-
-function normalizeHex(input: string): string | null {
+function normalizeRgbHex(input: string): string | null {
   const trimmed = input.trim().replace(/^#/, "");
   if (/^[0-9a-fA-F]{3}$/.test(trimmed)) {
     const expanded = trimmed
@@ -169,33 +165,103 @@ function normalizeHex(input: string): string | null {
   return null;
 }
 
-function hexToRgb(hex: string): [number, number, number] {
-  const clean = normalizeHex(hex) ?? STARTING_COLORS[0].hex;
-  const num = parseInt(clean.slice(1), 16);
+function formatRgbaHex(rgbHex: string, opacity: number): string {
+  const cleanRgb = normalizeRgbHex(rgbHex) ?? STARTING_COLORS[0].hex;
+  const alphaByte = Math.round(clampOpacity(opacity) * 255)
+    .toString(16)
+    .padStart(2, "0");
+  return `${cleanRgb}${alphaByte}`;
+}
+
+function parseRgbaHex(
+  input: unknown,
+  fallbackOpacity = DEFAULT_OPACITY
+): { hex: string; opacity: number } {
+  if (typeof input !== "string") {
+    return { hex: STARTING_COLORS[0].hex, opacity: fallbackOpacity };
+  }
+  const trimmed = input.trim().replace(/^#/, "");
+  if (/^[0-9a-fA-F]{8}$/.test(trimmed)) {
+    const hex = `#${trimmed.slice(0, 6).toLowerCase()}`;
+    const opacity = parseInt(trimmed.slice(6, 8), 16) / 255;
+    return { hex, opacity: clampOpacity(opacity) };
+  }
+  if (/^[0-9a-fA-F]{4}$/.test(trimmed)) {
+    const hex = `#${trimmed[0]}${trimmed[0]}${trimmed[1]}${trimmed[1]}${trimmed[2]}${trimmed[2]}`.toLowerCase();
+    const opacity = parseInt(`${trimmed[3]}${trimmed[3]}`, 16) / 255;
+    return { hex, opacity: clampOpacity(opacity) };
+  }
+  const rgbOnly = normalizeRgbHex(trimmed);
+  if (rgbOnly) {
+    return { hex: rgbOnly, opacity: fallbackOpacity };
+  }
+  return { hex: STARTING_COLORS[0].hex, opacity: fallbackOpacity };
+}
+
+function rgbaHexToFloat4(rgbaHex: string): [number, number, number, number] {
+  const { hex, opacity } = parseRgbaHex(rgbaHex);
+  const num = parseInt(hex.slice(1), 16);
   return [
     ((num >> 16) & 255) / 255,
     ((num >> 8) & 255) / 255,
     (num & 255) / 255,
+    opacity,
   ];
 }
 
+function getBuiltInOpacities(): Record<string, number> {
+  try {
+    const raw = localStorage.getItem(BUILTIN_OPACITIES_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveBuiltInOpacity(id: string, opacity: number) {
+  const current = getBuiltInOpacities();
+  current[id] = clampOpacity(opacity);
+  localStorage.setItem(BUILTIN_OPACITIES_STORAGE_KEY, JSON.stringify(current));
+}
+
 function getSavedColors(): SavedGooColor[] {
+  const builtInOpacities = getBuiltInOpacities();
+  const builtIns = STARTING_COLORS.map((c) => ({
+    ...c,
+    opacity:
+      typeof builtInOpacities[c.id] === "number"
+        ? clampOpacity(builtInOpacities[c.id])
+        : c.opacity,
+  }));
+
   try {
     const raw = localStorage.getItem(CUSTOM_COLORS_STORAGE_KEY);
-    if (!raw) return [...STARTING_COLORS];
+    if (!raw) return builtIns;
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [...STARTING_COLORS];
-    const custom = parsed.filter(
-      (c): c is SavedGooColor =>
-        c &&
-        typeof c.id === "string" &&
-        typeof c.name === "string" &&
-        typeof c.hex === "string" &&
-        normalizeHex(c.hex) !== null
-    );
-    return [...STARTING_COLORS, ...custom];
+    if (!Array.isArray(parsed)) return builtIns;
+    const custom = parsed
+      .filter(
+        (c) =>
+          c &&
+          typeof c.id === "string" &&
+          typeof c.name === "string" &&
+          typeof c.hex === "string" &&
+          normalizeRgbHex(c.hex) !== null
+      )
+      .map((c) => ({
+        id: c.id,
+        name: c.name,
+        hex: normalizeRgbHex(c.hex)!,
+        opacity:
+          typeof c.opacity === "number" && Number.isFinite(c.opacity)
+            ? clampOpacity(c.opacity)
+            : DEFAULT_OPACITY,
+      }));
+    return [...builtIns, ...custom];
   } catch {
-    return [...STARTING_COLORS];
+    return builtIns;
   }
 }
 
@@ -214,14 +280,21 @@ function getSavedGroups(): SavedGooGroup[] {
     if (!Array.isArray(parsed) || parsed.length === 0) {
       return STARTING_GROUPS.map((g) => ({ ...g }));
     }
-    const valid = parsed.filter(
-      (g): g is SavedGooGroup =>
-        g &&
-        typeof g.id === "string" &&
-        typeof g.name === "string" &&
-        typeof g.hex === "string" &&
-        normalizeHex(g.hex) !== null
-    );
+    const valid: SavedGooGroup[] = [];
+    for (const g of parsed) {
+      if (!g || typeof g.id !== "string" || typeof g.name !== "string") continue;
+      // Support both new `rgbaHex` and legacy `hex` properties
+      const rawColor = typeof g.rgbaHex === "string" ? g.rgbaHex : g.hex;
+      if (typeof rawColor !== "string") continue;
+      const { hex, opacity } = parseRgbaHex(rawColor);
+      valid.push({
+        id: g.id,
+        name: g.name,
+        rgbaHex: formatRgbaHex(hex, opacity),
+        keepWhenHidden: Boolean(g.keepWhenHidden),
+        builtIn: Boolean(g.builtIn),
+      });
+    }
     return valid.length > 0 ? valid : STARTING_GROUPS.map((g) => ({ ...g }));
   } catch {
     return STARTING_GROUPS.map((g) => ({ ...g }));
@@ -232,16 +305,15 @@ function saveGroups(groups: SavedGooGroup[]) {
   localStorage.setItem(GROUPS_STORAGE_KEY, JSON.stringify(groups));
 }
 
-function getDefaultHex(): string {
+function getDefaultRgbaHex(): string {
   const saved = localStorage.getItem(DEFAULT_COLOR_STORAGE_KEY);
-  return (saved && normalizeHex(saved)) || STARTING_COLORS[0].hex;
+  const { hex, opacity } = parseRgbaHex(saved);
+  return formatRgbaHex(hex, opacity);
 }
 
-function setDefaultHex(hex: string) {
-  const norm = normalizeHex(hex);
-  if (norm) {
-    localStorage.setItem(DEFAULT_COLOR_STORAGE_KEY, norm);
-  }
+function setDefaultRgbaHex(rgbaHex: string) {
+  const { hex, opacity } = parseRgbaHex(rgbaHex);
+  localStorage.setItem(DEFAULT_COLOR_STORAGE_KEY, formatRgbaHex(hex, opacity));
 }
 
 function getStoredActiveTarget(): string {
@@ -267,25 +339,18 @@ async function syncGooEffect() {
     const sceneReady = await OBR.scene.isReady();
     if (!sceneReady) return;
 
-    const [items, localItems, dpi, sceneMeta] = await Promise.all([
+    const [items, localItems, dpi] = await Promise.all([
       OBR.scene.items.getItems(),
       OBR.scene.local.getItems(),
       OBR.scene.grid.getDpi(),
-      OBR.scene.getMetadata(),
     ]);
-
-    const rawOpacity = sceneMeta[SCENE_OPACITY_META_KEY];
-    const opacity =
-      typeof rawOpacity === "number" && Number.isFinite(rawOpacity)
-        ? clampOpacity(rawOpacity)
-        : getDefaultOpacity();
 
     const radius = dpi * AURA_RADIUS_MULTIPLIER;
     const smoothness = dpi * SMOOTHNESS_MULTIPLIER;
     const padding = radius + smoothness * 1.5;
 
-    // Collect positions & hex colors of visible goo tokens (or hidden ones flagged to stay visible)
-    const activeHexes: string[] = [];
+    // Collect positions & RGBA hex colors of visible goo tokens
+    const activeRgbaHexes: string[] = [];
     const tokens: { x: number; y: number; colorIdx: number }[] = [];
 
     for (const item of items) {
@@ -295,19 +360,16 @@ async function syncGooEffect() {
           continue;
         }
 
-        const rawColor = item.metadata[COLOR_META_KEY];
-        const hex =
-          typeof rawColor === "string"
-            ? normalizeHex(rawColor) ?? STARTING_COLORS[0].hex
-            : STARTING_COLORS[0].hex;
+        const { hex, opacity } = parseRgbaHex(item.metadata[COLOR_META_KEY]);
+        const rgbaHex = formatRgbaHex(hex, opacity);
 
-        let colorIdx = activeHexes.indexOf(hex);
+        let colorIdx = activeRgbaHexes.indexOf(rgbaHex);
         if (colorIdx === -1) {
-          if (activeHexes.length < MAX_ACTIVE_PALETTE) {
-            colorIdx = activeHexes.length;
-            activeHexes.push(hex);
+          if (activeRgbaHexes.length < MAX_ACTIVE_PALETTE) {
+            colorIdx = activeRgbaHexes.length;
+            activeRgbaHexes.push(rgbaHex);
           } else {
-            colorIdx = activeHexes.length - 1;
+            colorIdx = activeRgbaHexes.length - 1;
           }
         }
 
@@ -348,25 +410,20 @@ async function syncGooEffect() {
     const width = Math.max(maxX - minX, 1);
     const height = Math.max(maxY - minY, 1);
 
-    // Pack up to 12 active hex colors into 4 float3x3 palette matrices
-    const paletteMatrices: Matrix[] = [];
-    for (let p = 0; p < 4; p++) {
-      const c0 = hexToRgb(activeHexes[p * 3 + 0] ?? STARTING_COLORS[0].hex);
-      const c1 = hexToRgb(activeHexes[p * 3 + 1] ?? STARTING_COLORS[0].hex);
-      const c2 = hexToRgb(activeHexes[p * 3 + 2] ?? STARTING_COLORS[0].hex);
-      paletteMatrices.push([...c0, ...c1, ...c2] as Matrix);
-    }
-
     const uniforms: Uniform[] = [
-      { name: "uPal0", value: paletteMatrices[0] },
-      { name: "uPal1", value: paletteMatrices[1] },
-      { name: "uPal2", value: paletteMatrices[2] },
-      { name: "uPal3", value: paletteMatrices[3] },
       { name: "uCount", value: tokens.length },
       { name: "uRadius", value: radius },
       { name: "uSmoothness", value: smoothness },
-      { name: "uOpacity", value: opacity },
     ];
+
+    // Pack up to 12 active RGBA colors into 6 float3x3 palette matrices (2 RGBA per matrix)
+    const fallbackRgba = STARTING_GROUPS[0].rgbaHex;
+    for (let p = 0; p < NUM_PALETTE_MATRICES; p++) {
+      const c0 = rgbaHexToFloat4(activeRgbaHexes[p * 2 + 0] ?? fallbackRgba);
+      const c1 = rgbaHexToFloat4(activeRgbaHexes[p * 2 + 1] ?? fallbackRgba);
+      const palMat: Matrix = [...c0, ...c1, 0];
+      uniforms.push({ name: `uPal${p}`, value: palMat });
+    }
 
     // Pack 3 monsters per 9-element Matrix: [x, y, paletteIndex]
     for (let m = 0; m < NUM_MATRICES; m++) {
@@ -422,18 +479,6 @@ async function syncGooEffect() {
   }
 }
 
-async function ensureSceneOpacityInitialized() {
-  if ((await OBR.player.getRole()) !== "GM") return;
-  if (!(await OBR.scene.isReady())) return;
-
-  const meta = await OBR.scene.getMetadata();
-  if (typeof meta[SCENE_OPACITY_META_KEY] !== "number") {
-    await OBR.scene.setMetadata({
-      [SCENE_OPACITY_META_KEY]: getDefaultOpacity(),
-    });
-  }
-}
-
 let contextMenusRegistered = false;
 
 async function syncContextMenuForRole(role: "GM" | "PLAYER") {
@@ -468,13 +513,13 @@ async function syncContextMenuForRole(role: "GM" | "PLAYER") {
         const shouldEnable = context.items.some(
           (item) => !item.metadata[META_KEY]
         );
-        const defaultHex = getDefaultHex();
+        const defaultRgba = getDefaultRgbaHex();
         await OBR.scene.items.updateItems(context.items, (items) => {
           for (const item of items) {
             if (shouldEnable) {
               item.metadata[META_KEY] = true;
               if (typeof item.metadata[COLOR_META_KEY] !== "string") {
-                item.metadata[COLOR_META_KEY] = defaultHex;
+                item.metadata[COLOR_META_KEY] = defaultRgba;
               }
             } else {
               delete item.metadata[META_KEY];
@@ -658,7 +703,12 @@ async function renderPopoverUI() {
     container.style.flexDirection = "column";
     container.style.height = "100vh";
 
-    let activeHex = getDefaultHex();
+    const initialRgba = parseRgbaHex(getDefaultRgbaHex());
+    let activeHex = initialRgba.hex;
+    let activeOpacity = initialRgba.opacity;
+    let editingColorId: string | null =
+      getSavedColors().find((c) => c.hex === activeHex)?.id ?? null;
+
     let activeTarget = getStoredActiveTarget(); // "selection" or group.id
     let groupCounts: Record<string, number> = {};
     let selectedCount = 0;
@@ -715,7 +765,7 @@ async function renderPopoverUI() {
     groupList.style.display = "flex";
     groupList.style.flexDirection = "column";
     groupList.style.gap = "5px";
-    groupList.style.maxHeight = "144px";
+    groupList.style.maxHeight = "140px";
     groupList.style.overflowY = "auto";
     groupList.style.overflowX = "hidden";
     groupList.style.padding = "1px";
@@ -743,18 +793,58 @@ async function renderPopoverUI() {
     colorList.style.padding = "2px";
     colorList.style.marginBottom = "8px";
 
-    // --- CUSTOM COLOR INPUTS ---
+    // --- COLOR OPACITY & CUSTOM COLOR SECTION ---
     const customSection = document.createElement("div");
     customSection.style.borderTop = "1px solid #2e3038";
     customSection.style.paddingTop = "8px";
     customSection.style.marginBottom = "8px";
+    customSection.style.display = "flex";
+    customSection.style.flexDirection = "column";
+    customSection.style.gap = "6px";
 
+    // Per-Color Opacity Slider
+    const opacityRow = document.createElement("div");
+    opacityRow.style.display = "flex";
+    opacityRow.style.flexDirection = "column";
+    opacityRow.style.gap = "4px";
+    opacityRow.style.padding = "5px 8px";
+    opacityRow.style.borderRadius = "6px";
+    opacityRow.style.background = "#141519";
+    opacityRow.style.border = "1px solid #2e3038";
+
+    const opacityTopRow = document.createElement("div");
+    opacityTopRow.style.display = "flex";
+    opacityTopRow.style.justifyContent = "space-between";
+    opacityTopRow.style.alignItems = "center";
+
+    const opacityLabel = document.createElement("span");
+    opacityLabel.style.fontSize = "11px";
+    opacityLabel.style.color = "#d1d5db";
+    opacityLabel.textContent = "Color Opacity";
+
+    const opacityValueTag = document.createElement("span");
+    opacityValueTag.style.fontSize = "11px";
+    opacityValueTag.style.fontFamily = "monospace";
+    opacityValueTag.style.color = "#93c5fd";
+    opacityValueTag.textContent = `${Math.round(activeOpacity * 100)}%`;
+
+    const opacitySlider = document.createElement("input");
+    opacitySlider.type = "range";
+    opacitySlider.className = "goo-opacity-slider";
+    opacitySlider.min = "0";
+    opacitySlider.max = "100";
+    opacitySlider.step = "1";
+    opacitySlider.value = String(Math.round(activeOpacity * 100));
+
+    opacityTopRow.append(opacityLabel, opacityValueTag);
+    opacityRow.append(opacityTopRow, opacitySlider);
+
+    // Custom Color Name + Picker + Hex + Save
     const nameInput = document.createElement("input");
     nameInput.type = "text";
     nameInput.placeholder = "New color name (e.g. Bile Yellow)";
     nameInput.style.width = "100%";
     nameInput.style.padding = "5px 8px";
-    nameInput.style.marginBottom = "5px";
     nameInput.style.borderRadius = "6px";
     nameInput.style.border = "1px solid #374151";
     nameInput.style.background = "#141519";
@@ -769,7 +859,7 @@ async function renderPopoverUI() {
 
     const pickerInput = document.createElement("input");
     pickerInput.type = "color";
-    pickerInput.value = "#06b6d4";
+    pickerInput.value = activeHex;
     pickerInput.style.width = "28px";
     pickerInput.style.height = "26px";
     pickerInput.style.padding = "0";
@@ -780,7 +870,7 @@ async function renderPopoverUI() {
 
     const hexInput = document.createElement("input");
     hexInput.type = "text";
-    hexInput.value = "#06b6d4";
+    hexInput.value = activeHex;
     hexInput.placeholder = "#06b6d4";
     hexInput.style.flex = "1";
     hexInput.style.minWidth = "0";
@@ -793,16 +883,29 @@ async function renderPopoverUI() {
     hexInput.style.fontFamily = "monospace";
     hexInput.style.outline = "none";
 
+    // Detach from existing saved color when typing a new name or picking a new hex
+    nameInput.addEventListener("input", () => {
+      if (nameInput.value.trim().length > 0) {
+        editingColorId = null;
+      }
+    });
+
     pickerInput.addEventListener("input", () => {
       hexInput.value = pickerInput.value;
       hexInput.style.borderColor = "#374151";
+      editingColorId = null;
+      activeHex = pickerInput.value;
+      rebuildSwatches();
     });
 
     hexInput.addEventListener("input", () => {
-      const norm = normalizeHex(hexInput.value);
+      const norm = normalizeRgbHex(hexInput.value);
       if (norm) {
         pickerInput.value = norm;
         hexInput.style.borderColor = "#374151";
+        editingColorId = null;
+        activeHex = norm;
+        rebuildSwatches();
       }
     });
 
@@ -818,83 +921,7 @@ async function renderPopoverUI() {
     saveBtn.style.cursor = "pointer";
 
     hexRow.append(pickerInput, hexInput, saveBtn);
-    customSection.append(nameInput, hexRow);
-
-    // --- OPACITY SLIDER ---
-    const opacityBox = document.createElement("div");
-    opacityBox.style.padding = "6px 8px";
-    opacityBox.style.marginBottom = "6px";
-    opacityBox.style.borderRadius = "6px";
-    opacityBox.style.background = "#141519";
-    opacityBox.style.border = "1px solid #2e3038";
-    opacityBox.style.display = "flex";
-    opacityBox.style.flexDirection = "column";
-    opacityBox.style.gap = "5px";
-
-    const opacityTopRow = document.createElement("div");
-    opacityTopRow.style.display = "flex";
-    opacityTopRow.style.justifyContent = "space-between";
-    opacityTopRow.style.alignItems = "center";
-
-    const opacityLabel = document.createElement("span");
-    opacityLabel.style.fontSize = "11px";
-    opacityLabel.style.color = "#d1d5db";
-    opacityLabel.textContent = "Goo Opacity";
-
-    const opacityValueTag = document.createElement("span");
-    opacityValueTag.style.fontSize = "11px";
-    opacityValueTag.style.fontFamily = "monospace";
-    opacityValueTag.style.color = "#93c5fd";
-
-    const initialPct = Math.round(getDefaultOpacity() * 100);
-    opacityValueTag.textContent = `${initialPct}%`;
-
-    const opacitySlider = document.createElement("input");
-    opacitySlider.type = "range";
-    opacitySlider.className = "goo-opacity-slider";
-    opacitySlider.min = "0";
-    opacitySlider.max = "100";
-    opacitySlider.step = "1";
-    opacitySlider.value = String(initialPct);
-
-    opacityTopRow.append(opacityLabel, opacityValueTag);
-    opacityBox.append(opacityTopRow, opacitySlider);
-
-    let lastOpacityPush = 0;
-    let opacityTimer: number | undefined;
-
-    async function pushSceneOpacity(pct: number) {
-      if ((await OBR.player.getRole()) !== "GM") return;
-      const normalized = clampOpacity(pct / 100);
-      setDefaultOpacity(normalized);
-      if (await OBR.scene.isReady()) {
-        await OBR.scene.setMetadata({
-          [SCENE_OPACITY_META_KEY]: normalized,
-        });
-      }
-    }
-
-    opacitySlider.addEventListener("input", () => {
-      const pct = Number(opacitySlider.value);
-      opacityValueTag.textContent = `${pct}%`;
-
-      const now = Date.now();
-      if (now - lastOpacityPush >= 40) {
-        lastOpacityPush = now;
-        pushSceneOpacity(pct);
-      } else {
-        window.clearTimeout(opacityTimer);
-        opacityTimer = window.setTimeout(() => {
-          lastOpacityPush = Date.now();
-          pushSceneOpacity(pct);
-        }, 40);
-      }
-    });
-
-    opacitySlider.addEventListener("change", () => {
-      window.clearTimeout(opacityTimer);
-      pushSceneOpacity(Number(opacitySlider.value));
-    });
+    customSection.append(opacityRow, nameInput, hexRow);
 
     // --- HIDDEN TOKEN VISIBILITY TOGGLE ---
     const hiddenToggleRow = document.createElement("label");
@@ -934,6 +961,16 @@ async function renderPopoverUI() {
     removeBtn.style.fontWeight = "600";
     removeBtn.style.cursor = "pointer";
 
+    function syncEditorInputs(hex: string, opacity: number) {
+      activeHex = hex;
+      activeOpacity = clampOpacity(opacity);
+      pickerInput.value = hex;
+      hexInput.value = hex;
+      const pct = Math.round(activeOpacity * 100);
+      opacitySlider.value = String(pct);
+      opacityValueTag.textContent = `${pct}%`;
+    }
+
     function updateFooterControls() {
       if (activeTarget === "selection") {
         removeBtn.textContent = "Remove Goo from Selected";
@@ -955,8 +992,15 @@ async function renderPopoverUI() {
       if (target !== "selection") {
         const grp = getSavedGroups().find((g) => g.id === target);
         if (grp) {
-          activeHex = grp.hex;
-          setDefaultHex(grp.hex);
+          const parsed = parseRgbaHex(grp.rgbaHex);
+          syncEditorInputs(parsed.hex, parsed.opacity);
+          setDefaultRgbaHex(grp.rgbaHex);
+          const matchingPreset = getSavedColors().find(
+            (c) =>
+              c.hex === parsed.hex &&
+              Math.abs(c.opacity - parsed.opacity) < 0.02
+          );
+          editingColorId = matchingPreset?.id ?? null;
         }
       }
 
@@ -1025,7 +1069,7 @@ async function renderPopoverUI() {
       });
     }
 
-    async function applyColorToTarget(hex: string) {
+    async function applyRgbaToTarget(rgbaHex: string) {
       if ((await OBR.player.getRole()) !== "GM") return;
 
       if (activeTarget === "selection") {
@@ -1036,7 +1080,7 @@ async function renderPopoverUI() {
           for (const item of items) {
             if (isImage(item) && item.layer === "CHARACTER") {
               item.metadata[META_KEY] = true;
-              item.metadata[COLOR_META_KEY] = hex;
+              item.metadata[COLOR_META_KEY] = rgbaHex;
             }
           }
         });
@@ -1044,7 +1088,7 @@ async function renderPopoverUI() {
         const groups = getSavedGroups();
         const targetGroup = groups.find((g) => g.id === activeTarget);
         if (targetGroup) {
-          targetGroup.hex = hex;
+          targetGroup.rgbaHex = rgbaHex;
           saveGroups(groups);
         }
 
@@ -1060,7 +1104,7 @@ async function renderPopoverUI() {
           await OBR.scene.items.updateItems(groupTokenIds, (items) => {
             for (const item of items) {
               item.metadata[META_KEY] = true;
-              item.metadata[COLOR_META_KEY] = hex;
+              item.metadata[COLOR_META_KEY] = rgbaHex;
               if (targetGroup?.keepWhenHidden) {
                 item.metadata[KEEP_WHEN_HIDDEN_META_KEY] = true;
               } else {
@@ -1074,6 +1118,56 @@ async function renderPopoverUI() {
       }
     }
 
+    // Live opacity slider updates both the active color preset and the map target
+    let lastOpacityPush = 0;
+    let opacityTimer: number | undefined;
+
+    async function commitOpacityChange(pct: number) {
+      const nextOpacity = clampOpacity(pct / 100);
+      activeOpacity = nextOpacity;
+      const rgbaHex = formatRgbaHex(activeHex, nextOpacity);
+      setDefaultRgbaHex(rgbaHex);
+
+      // Update the saved color preset if one is currently selected
+      if (editingColorId) {
+        const allColors = getSavedColors();
+        const targetColor = allColors.find((c) => c.id === editingColorId);
+        if (targetColor) {
+          if (targetColor.builtIn) {
+            saveBuiltInOpacity(targetColor.id, nextOpacity);
+          } else {
+            targetColor.opacity = nextOpacity;
+            saveCustomColors(allColors);
+          }
+          rebuildSwatches();
+        }
+      }
+
+      await applyRgbaToTarget(rgbaHex);
+    }
+
+    opacitySlider.addEventListener("input", () => {
+      const pct = Number(opacitySlider.value);
+      opacityValueTag.textContent = `${pct}%`;
+
+      const now = Date.now();
+      if (now - lastOpacityPush >= 45) {
+        lastOpacityPush = now;
+        commitOpacityChange(pct);
+      } else {
+        window.clearTimeout(opacityTimer);
+        opacityTimer = window.setTimeout(() => {
+          lastOpacityPush = Date.now();
+          commitOpacityChange(pct);
+        }, 45);
+      }
+    });
+
+    opacitySlider.addEventListener("change", () => {
+      window.clearTimeout(opacityTimer);
+      commitOpacityChange(Number(opacitySlider.value));
+    });
+
     async function assignSelectionToGroup(group: SavedGooGroup) {
       if ((await OBR.player.getRole()) !== "GM") return;
 
@@ -1085,7 +1179,7 @@ async function renderPopoverUI() {
           if (isImage(item) && item.layer === "CHARACTER") {
             item.metadata[GROUP_META_KEY] = group.id;
             item.metadata[META_KEY] = true;
-            item.metadata[COLOR_META_KEY] = group.hex;
+            item.metadata[COLOR_META_KEY] = group.rgbaHex;
             if (group.keepWhenHidden) {
               item.metadata[KEEP_WHEN_HIDDEN_META_KEY] = true;
             } else {
@@ -1142,6 +1236,7 @@ async function renderPopoverUI() {
 
       // 2. Saved Goo Groups
       groups.forEach((group) => {
+        const parsedColor = parseRgbaHex(group.rgbaHex);
         const row = document.createElement("div");
         row.style.display = "flex";
         row.style.alignItems = "center";
@@ -1157,9 +1252,10 @@ async function renderPopoverUI() {
         colorDot.style.width = "10px";
         colorDot.style.height = "10px";
         colorDot.style.borderRadius = "50%";
-        colorDot.style.background = group.hex;
+        colorDot.style.background = parsedColor.hex;
+        colorDot.style.opacity = String(Math.max(0.25, parsedColor.opacity));
         colorDot.style.flexShrink = "0";
-        colorDot.style.border = "1px solid rgba(255,255,255,0.35)";
+        colorDot.style.border = "1px solid rgba(255,255,255,0.45)";
 
         // Inline editable group name
         const groupNameInput = document.createElement("input");
@@ -1301,7 +1397,7 @@ async function renderPopoverUI() {
       const newGroup: SavedGooGroup = {
         id: `group-${Date.now()}`,
         name: `Group ${nextNum}`,
-        hex: activeHex,
+        rgbaHex: formatRgbaHex(activeHex, activeOpacity),
         keepWhenHidden: false,
       };
       saveGroups([...current, newGroup]);
@@ -1315,6 +1411,11 @@ async function renderPopoverUI() {
       colorList.replaceChildren();
 
       colors.forEach((preset) => {
+        const pct = Math.round(preset.opacity * 100);
+        const isSelected =
+          editingColorId === preset.id ||
+          (editingColorId === null && preset.hex === activeHex);
+
         const row = document.createElement("div");
         row.style.display = "flex";
         row.style.alignItems = "center";
@@ -1323,7 +1424,7 @@ async function renderPopoverUI() {
         row.style.flexShrink = "0";
 
         const btn = document.createElement("button");
-        btn.title = `${preset.name} (${preset.hex})`;
+        btn.title = `${preset.name} (${preset.hex} · ${pct}% opacity)`;
         btn.style.flex = "1";
         btn.style.minWidth = "0";
         btn.style.height = "28px";
@@ -1335,11 +1436,10 @@ async function renderPopoverUI() {
         btn.style.display = "flex";
         btn.style.alignItems = "center";
         btn.style.justifyContent = "space-between";
-        btn.style.gap = "8px";
-        btn.style.outline =
-          preset.hex === activeHex
-            ? "2px solid #ffffff"
-            : "2px solid transparent";
+        btn.style.gap = "6px";
+        btn.style.outline = isSelected
+          ? "2px solid #ffffff"
+          : "2px solid transparent";
         btn.style.outlineOffset = "1px";
 
         const nameLabel = document.createElement("span");
@@ -1352,21 +1452,24 @@ async function renderPopoverUI() {
         nameLabel.style.textOverflow = "ellipsis";
         nameLabel.textContent = preset.name;
 
-        const hexTag = document.createElement("span");
-        hexTag.style.fontSize = "10px";
-        hexTag.style.fontFamily = "monospace";
-        hexTag.style.color = "rgba(255,255,255,0.85)";
-        hexTag.style.textShadow = "0 1px 2px rgba(0,0,0,0.8)";
-        hexTag.style.flexShrink = "0";
-        hexTag.textContent = preset.hex.toUpperCase();
+        const metaTag = document.createElement("span");
+        metaTag.style.fontSize = "10px";
+        metaTag.style.fontFamily = "monospace";
+        metaTag.style.color = "rgba(255,255,255,0.9)";
+        metaTag.style.textShadow = "0 1px 2px rgba(0,0,0,0.8)";
+        metaTag.style.flexShrink = "0";
+        metaTag.textContent = `${preset.hex.toUpperCase()} · ${pct}%`;
 
-        btn.append(nameLabel, hexTag);
+        btn.append(nameLabel, metaTag);
 
         btn.addEventListener("click", async () => {
-          activeHex = preset.hex;
-          setDefaultHex(preset.hex);
+          editingColorId = preset.id;
+          nameInput.value = "";
+          syncEditorInputs(preset.hex, preset.opacity);
+          const rgbaHex = formatRgbaHex(preset.hex, preset.opacity);
+          setDefaultRgbaHex(rgbaHex);
           rebuildSwatches();
-          await applyColorToTarget(preset.hex);
+          await applyRgbaToTarget(rgbaHex);
         });
 
         row.appendChild(btn);
@@ -1393,9 +1496,11 @@ async function renderPopoverUI() {
               (c) => !c.builtIn && c.id !== preset.id
             );
             saveCustomColors(remaining);
-            if (activeHex === preset.hex) {
-              activeHex = STARTING_COLORS[0].hex;
-              setDefaultHex(activeHex);
+            if (editingColorId === preset.id) {
+              const fallback = STARTING_COLORS[0];
+              editingColorId = fallback.id;
+              syncEditorInputs(fallback.hex, fallback.opacity);
+              setDefaultRgbaHex(formatRgbaHex(fallback.hex, fallback.opacity));
             }
             rebuildSwatches();
           });
@@ -1410,7 +1515,7 @@ async function renderPopoverUI() {
     saveBtn.addEventListener("click", async () => {
       if ((await OBR.player.getRole()) !== "GM") return;
 
-      const norm = normalizeHex(hexInput.value);
+      const norm = normalizeRgbHex(hexInput.value);
       if (!norm) {
         hexInput.style.borderColor = "#ef4444";
         return;
@@ -1418,19 +1523,23 @@ async function renderPopoverUI() {
 
       const customName = nameInput.value.trim() || norm.toUpperCase();
       const existingCustom = getSavedColors().filter((c) => !c.builtIn);
+      const newId = `custom-${Date.now()}`;
       const newEntry: SavedGooColor = {
-        id: `custom-${Date.now()}`,
+        id: newId,
         name: customName,
         hex: norm,
+        opacity: activeOpacity,
       };
 
       saveCustomColors([...existingCustom, newEntry]);
       nameInput.value = "";
-      activeHex = norm;
-      setDefaultHex(norm);
+      editingColorId = newId;
+      syncEditorInputs(norm, activeOpacity);
+      const rgbaHex = formatRgbaHex(norm, activeOpacity);
+      setDefaultRgbaHex(rgbaHex);
       rebuildSwatches();
       colorList.scrollTop = colorList.scrollHeight;
-      await applyColorToTarget(norm);
+      await applyRgbaToTarget(rgbaHex);
     });
 
     removeBtn.addEventListener("click", async () => {
@@ -1478,18 +1587,7 @@ async function renderPopoverUI() {
       statusBadge.textContent = `${selectedCount} selected`;
 
       if (sceneReady) {
-        const [items, sceneMeta] = await Promise.all([
-          OBR.scene.items.getItems(),
-          OBR.scene.getMetadata(),
-        ]);
-
-        const rawOpacity = sceneMeta[SCENE_OPACITY_META_KEY];
-        if (typeof rawOpacity === "number" && Number.isFinite(rawOpacity)) {
-          const pct = Math.round(clampOpacity(rawOpacity) * 100);
-          opacitySlider.value = String(pct);
-          opacityValueTag.textContent = `${pct}%`;
-        }
-
+        const items = await OBR.scene.items.getItems();
         const counts: Record<string, number> = {};
         let anySelectedKeep = false;
 
@@ -1530,7 +1628,6 @@ async function renderPopoverUI() {
       colorSectionLabel,
       colorList,
       customSection,
-      opacityBox,
       hiddenToggleRow,
       removeBtn
     );
@@ -1574,19 +1671,13 @@ OBR.onReady(async () => {
   });
 
   if (await OBR.scene.isReady()) {
-    await ensureSceneOpacityInitialized();
     syncGooEffect();
   }
 
-  OBR.scene.onReadyChange(async (ready) => {
+  OBR.scene.onReadyChange((ready) => {
     if (ready) {
-      await ensureSceneOpacityInitialized();
       syncGooEffect();
     }
-  });
-
-  OBR.scene.onMetadataChange(() => {
-    syncGooEffect();
   });
 
   OBR.scene.items.onChange(() => {
