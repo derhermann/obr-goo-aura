@@ -10,8 +10,11 @@ const EXTENSION_ID = "com.custom.goo-aura";
 const META_KEY = `${EXTENSION_ID}/enabled`;
 const COLOR_META_KEY = `${EXTENSION_ID}/color`;
 const GROUP_META_KEY = `${EXTENSION_ID}/group`;
+const KEEP_WHEN_HIDDEN_META_KEY = `${EXTENSION_ID}/keep-when-hidden`;
 const EFFECT_META_KEY = `${EXTENSION_ID}/is-goo-effect`;
-const CONTEXT_MENU_ID = `${EXTENSION_ID}/toggle`;
+
+const TOGGLE_MENU_ID = `${EXTENSION_ID}/toggle`;
+const HIDDEN_BEHAVIOR_MENU_ID = `${EXTENSION_ID}/toggle-hidden-behavior`;
 
 const CUSTOM_COLORS_STORAGE_KEY = `${EXTENSION_ID}/custom-colors`;
 const DEFAULT_COLOR_STORAGE_KEY = `${EXTENSION_ID}/default-hex`;
@@ -38,6 +41,7 @@ interface SavedGooGroup {
   id: string;
   name: string;
   hex: string;
+  keepWhenHidden?: boolean;
   builtIn?: boolean;
 }
 
@@ -48,10 +52,10 @@ const STARTING_COLORS: SavedGooColor[] = [
 ];
 
 const STARTING_GROUPS: SavedGooGroup[] = [
-  { id: "group-1", name: "Group 1", hex: "#2ed959", builtIn: true },
-  { id: "group-2", name: "Group 2", hex: "#ef4444", builtIn: true },
-  { id: "group-3", name: "Group 3", hex: "#a855f7", builtIn: true },
-  { id: "group-4", name: "Group 4", hex: "#06b6d4", builtIn: true },
+  { id: "group-1", name: "Group 1", hex: "#2ed959", keepWhenHidden: false, builtIn: true },
+  { id: "group-2", name: "Group 2", hex: "#ef4444", keepWhenHidden: false, builtIn: true },
+  { id: "group-3", name: "Group 3", hex: "#a855f7", keepWhenHidden: false, builtIn: true },
+  { id: "group-4", name: "Group 4", hex: "#06b6d4", keepWhenHidden: false, builtIn: true },
 ];
 
 const matrixUniforms = Array.from(
@@ -253,12 +257,17 @@ async function syncGooEffect() {
     const smoothness = dpi * SMOOTHNESS_MULTIPLIER;
     const padding = radius + smoothness * 1.5;
 
-    // Collect positions & hex colors of up to 42 tokens
+    // Collect positions & hex colors of visible goo tokens (or hidden ones flagged to stay visible)
     const activeHexes: string[] = [];
     const tokens: { x: number; y: number; colorIdx: number }[] = [];
 
     for (const item of items) {
       if (isImage(item) && item.metadata[META_KEY]) {
+        const keepWhenHidden = Boolean(item.metadata[KEEP_WHEN_HIDDEN_META_KEY]);
+        if (!item.visible && !keepWhenHidden) {
+          continue;
+        }
+
         const rawColor = item.metadata[COLOR_META_KEY];
         const hex =
           typeof rawColor === "string"
@@ -291,7 +300,7 @@ async function syncGooEffect() {
       return;
     }
 
-    // Calculate bounding box around all active goo tokens
+    // Calculate bounding box around all rendered goo tokens
     let minX = Infinity;
     let minY = Infinity;
     let maxX = -Infinity;
@@ -386,13 +395,15 @@ async function syncGooEffect() {
   }
 }
 
-let contextMenuRegistered = false;
+let contextMenusRegistered = false;
 
 async function syncContextMenuForRole(role: "GM" | "PLAYER") {
-  if (role === "GM" && !contextMenuRegistered) {
-    contextMenuRegistered = true;
+  if (role === "GM" && !contextMenusRegistered) {
+    contextMenusRegistered = true;
+
+    // 1. Enable / Disable Goo Aura
     await OBR.contextMenu.create({
-      id: CONTEXT_MENU_ID,
+      id: TOGGLE_MENU_ID,
       icons: [
         {
           icon: "/icon.svg",
@@ -429,14 +440,62 @@ async function syncContextMenuForRole(role: "GM" | "PLAYER") {
             } else {
               delete item.metadata[META_KEY];
               delete item.metadata[COLOR_META_KEY];
+              delete item.metadata[KEEP_WHEN_HIDDEN_META_KEY];
             }
           }
         });
       },
     });
-  } else if (role !== "GM" && contextMenuRegistered) {
-    contextMenuRegistered = false;
-    await OBR.contextMenu.remove(CONTEXT_MENU_ID);
+
+    // 2. Toggle whether Goo stays visible when the token is hidden
+    await OBR.contextMenu.create({
+      id: HIDDEN_BEHAVIOR_MENU_ID,
+      icons: [
+        {
+          icon: "/icon.svg",
+          label: "Keep Goo When Hidden",
+          filter: {
+            every: [
+              { key: "layer", value: "CHARACTER" },
+              { key: ["metadata", META_KEY], value: true },
+              { key: ["metadata", KEEP_WHEN_HIDDEN_META_KEY], value: undefined },
+            ],
+          },
+        },
+        {
+          icon: "/icon.svg",
+          label: "Hide Goo With Token",
+          filter: {
+            every: [
+              { key: "layer", value: "CHARACTER" },
+              { key: ["metadata", META_KEY], value: true },
+            ],
+          },
+        },
+      ],
+      async onClick(context) {
+        if ((await OBR.player.getRole()) !== "GM") return;
+
+        const shouldKeep = context.items.some(
+          (item) => !item.metadata[KEEP_WHEN_HIDDEN_META_KEY]
+        );
+        await OBR.scene.items.updateItems(context.items, (items) => {
+          for (const item of items) {
+            if (shouldKeep) {
+              item.metadata[KEEP_WHEN_HIDDEN_META_KEY] = true;
+            } else {
+              delete item.metadata[KEEP_WHEN_HIDDEN_META_KEY];
+            }
+          }
+        });
+      },
+    });
+  } else if (role !== "GM" && contextMenusRegistered) {
+    contextMenusRegistered = false;
+    await Promise.all([
+      OBR.contextMenu.remove(TOGGLE_MENU_ID),
+      OBR.contextMenu.remove(HIDDEN_BEHAVIOR_MENU_ID),
+    ]);
   }
 }
 
@@ -536,6 +595,7 @@ async function renderPopoverUI() {
     let activeTarget = getStoredActiveTarget(); // "selection" or group.id
     let groupCounts: Record<string, number> = {};
     let selectedCount = 0;
+    let selectionKeepWhenHidden = false;
 
     // Header
     const headerRow = document.createElement("div");
@@ -588,7 +648,7 @@ async function renderPopoverUI() {
     groupList.style.display = "flex";
     groupList.style.flexDirection = "column";
     groupList.style.gap = "5px";
-    groupList.style.maxHeight = "155px";
+    groupList.style.maxHeight = "148px";
     groupList.style.overflowY = "auto";
     groupList.style.overflowX = "hidden";
     groupList.style.padding = "1px";
@@ -610,7 +670,7 @@ async function renderPopoverUI() {
     colorList.style.flexDirection = "column";
     colorList.style.gap = "5px";
     colorList.style.flex = "1";
-    colorList.style.minHeight = "68px";
+    colorList.style.minHeight = "64px";
     colorList.style.overflowY = "auto";
     colorList.style.overflowX = "hidden";
     colorList.style.padding = "2px";
@@ -693,6 +753,32 @@ async function renderPopoverUI() {
     hexRow.append(pickerInput, hexInput, saveBtn);
     customSection.append(nameInput, hexRow);
 
+    // --- HIDDEN TOKEN VISIBILITY TOGGLE ---
+    const hiddenToggleRow = document.createElement("label");
+    hiddenToggleRow.style.display = "flex";
+    hiddenToggleRow.style.alignItems = "center";
+    hiddenToggleRow.style.justifyContent = "space-between";
+    hiddenToggleRow.style.gap = "8px";
+    hiddenToggleRow.style.padding = "6px 8px";
+    hiddenToggleRow.style.marginBottom = "8px";
+    hiddenToggleRow.style.borderRadius = "6px";
+    hiddenToggleRow.style.background = "#141519";
+    hiddenToggleRow.style.border = "1px solid #2e3038";
+    hiddenToggleRow.style.cursor = "pointer";
+
+    const hiddenToggleText = document.createElement("span");
+    hiddenToggleText.style.fontSize = "11px";
+    hiddenToggleText.style.color = "#d1d5db";
+    hiddenToggleText.textContent = "Keep goo when token is hidden";
+
+    const hiddenCheckbox = document.createElement("input");
+    hiddenCheckbox.type = "checkbox";
+    hiddenCheckbox.style.accentColor = "#3b82f6";
+    hiddenCheckbox.style.cursor = "pointer";
+    hiddenCheckbox.style.margin = "0";
+
+    hiddenToggleRow.append(hiddenToggleText, hiddenCheckbox);
+
     // --- REMOVE / HIDE GOO BUTTON ---
     const removeBtn = document.createElement("button");
     removeBtn.style.width = "100%";
@@ -705,15 +791,17 @@ async function renderPopoverUI() {
     removeBtn.style.fontWeight = "600";
     removeBtn.style.cursor = "pointer";
 
-    function updateFooterButtonLabel() {
+    function updateFooterControls() {
       if (activeTarget === "selection") {
         removeBtn.textContent = "Remove Goo from Selected";
         colorSectionLabel.textContent = "Apply Color to Selected Tokens";
+        hiddenCheckbox.checked = selectionKeepWhenHidden;
       } else {
         const grp = getSavedGroups().find((g) => g.id === activeTarget);
         const label = grp ? grp.name : "Group";
         removeBtn.textContent = `Turn Off Goo for "${label}"`;
         colorSectionLabel.textContent = `Apply Color to "${label}"`;
+        hiddenCheckbox.checked = Boolean(grp?.keepWhenHidden);
       }
     }
 
@@ -729,10 +817,60 @@ async function renderPopoverUI() {
         }
       }
 
-      updateFooterButtonLabel();
+      updateFooterControls();
       updateGroupRowHighlights();
       rebuildSwatches();
     }
+
+    hiddenCheckbox.addEventListener("change", async () => {
+      if ((await OBR.player.getRole()) !== "GM") return;
+      const keep = hiddenCheckbox.checked;
+
+      if (activeTarget === "selection") {
+        selectionKeepWhenHidden = keep;
+        const selection = await OBR.player.getSelection();
+        if (!selection || selection.length === 0) return;
+
+        await OBR.scene.items.updateItems(selection, (items) => {
+          for (const item of items) {
+            if (isImage(item) && item.layer === "CHARACTER") {
+              if (keep) {
+                item.metadata[KEEP_WHEN_HIDDEN_META_KEY] = true;
+              } else {
+                delete item.metadata[KEEP_WHEN_HIDDEN_META_KEY];
+              }
+            }
+          }
+        });
+      } else {
+        const groups = getSavedGroups();
+        const targetGroup = groups.find((g) => g.id === activeTarget);
+        if (targetGroup) {
+          targetGroup.keepWhenHidden = keep;
+          saveGroups(groups);
+        }
+
+        const allItems = await OBR.scene.items.getItems();
+        const groupTokenIds = allItems
+          .filter(
+            (item) =>
+              isImage(item) && item.metadata[GROUP_META_KEY] === activeTarget
+          )
+          .map((item) => item.id);
+
+        if (groupTokenIds.length > 0) {
+          await OBR.scene.items.updateItems(groupTokenIds, (items) => {
+            for (const item of items) {
+              if (keep) {
+                item.metadata[KEEP_WHEN_HIDDEN_META_KEY] = true;
+              } else {
+                delete item.metadata[KEEP_WHEN_HIDDEN_META_KEY];
+              }
+            }
+          });
+        }
+      }
+    });
 
     const groupRowElements = new Map<string, HTMLDivElement>();
 
@@ -760,7 +898,6 @@ async function renderPopoverUI() {
           }
         });
       } else {
-        // Update stored color on the group
         const groups = getSavedGroups();
         const targetGroup = groups.find((g) => g.id === activeTarget);
         if (targetGroup) {
@@ -768,7 +905,6 @@ async function renderPopoverUI() {
           saveGroups(groups);
         }
 
-        // Update all tokens on the scene assigned to this group
         const allItems = await OBR.scene.items.getItems();
         const groupTokenIds = allItems
           .filter(
@@ -782,6 +918,11 @@ async function renderPopoverUI() {
             for (const item of items) {
               item.metadata[META_KEY] = true;
               item.metadata[COLOR_META_KEY] = hex;
+              if (targetGroup?.keepWhenHidden) {
+                item.metadata[KEEP_WHEN_HIDDEN_META_KEY] = true;
+              } else {
+                delete item.metadata[KEEP_WHEN_HIDDEN_META_KEY];
+              }
             }
           });
         }
@@ -802,6 +943,11 @@ async function renderPopoverUI() {
             item.metadata[GROUP_META_KEY] = group.id;
             item.metadata[META_KEY] = true;
             item.metadata[COLOR_META_KEY] = group.hex;
+            if (group.keepWhenHidden) {
+              item.metadata[KEEP_WHEN_HIDDEN_META_KEY] = true;
+            } else {
+              delete item.metadata[KEEP_WHEN_HIDDEN_META_KEY];
+            }
           }
         }
       });
@@ -899,7 +1045,7 @@ async function renderPopoverUI() {
           if (target.name !== trimmed) {
             target.name = trimmed;
             saveGroups(currentGroups);
-            updateFooterButtonLabel();
+            updateFooterControls();
           }
         };
 
@@ -1003,7 +1149,7 @@ async function renderPopoverUI() {
       });
 
       updateGroupRowHighlights();
-      updateFooterButtonLabel();
+      updateFooterControls();
     }
 
     addGroupBtn.addEventListener("click", () => {
@@ -1013,6 +1159,7 @@ async function renderPopoverUI() {
         id: `group-${Date.now()}`,
         name: `Group ${nextNum}`,
         hex: activeHex,
+        keepWhenHidden: false,
       };
       saveGroups([...current, newGroup]);
       setActiveTarget(newGroup.id);
@@ -1155,10 +1302,10 @@ async function renderPopoverUI() {
             delete item.metadata[META_KEY];
             delete item.metadata[COLOR_META_KEY];
             delete item.metadata[GROUP_META_KEY];
+            delete item.metadata[KEEP_WHEN_HIDDEN_META_KEY];
           }
         });
       } else {
-        // Turn off goo for all tokens in the group while preserving their group membership
         const allItems = await OBR.scene.items.getItems();
         const groupTokenIds = allItems
           .filter(
@@ -1183,29 +1330,40 @@ async function renderPopoverUI() {
         OBR.scene.isReady(),
       ]);
 
-      selectedCount = selection ? selection.length : 0;
+      const selectedIds = selection ?? [];
+      selectedCount = selectedIds.length;
       statusBadge.textContent = `${selectedCount} selected`;
 
       if (sceneReady) {
         const items = await OBR.scene.items.getItems();
         const counts: Record<string, number> = {};
+        let anySelectedKeep = false;
+
         for (const item of items) {
           if (isImage(item)) {
             const gid = item.metadata[GROUP_META_KEY];
             if (typeof gid === "string") {
               counts[gid] = (counts[gid] ?? 0) + 1;
             }
+            if (
+              selectedIds.includes(item.id) &&
+              item.metadata[KEEP_WHEN_HIDDEN_META_KEY]
+            ) {
+              anySelectedKeep = true;
+            }
           }
         }
         groupCounts = counts;
+        selectionKeepWhenHidden = anySelectedKeep;
       }
 
-      // Avoid rebuilding group DOM while the user is actively typing a group name
       if (
         !document.activeElement ||
         !document.activeElement.classList.contains("goo-group-name-input")
       ) {
         rebuildGroups();
+      } else {
+        updateFooterControls();
       }
     };
 
@@ -1218,6 +1376,7 @@ async function renderPopoverUI() {
       colorSectionLabel,
       colorList,
       customSection,
+      hiddenToggleRow,
       removeBtn
     );
     document.body.replaceChildren(container);
