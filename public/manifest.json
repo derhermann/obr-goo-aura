@@ -1,0 +1,15 @@
+{
+  "name": "Goo Aura",
+  "version": "1.0.0",
+  "manifest_version": 1,
+  "description": "Merges monster token auras into a continuous semi-transparent liquid.",
+  "background_url": "/",
+  "action": {
+    "title": "Goo Aura",
+    "icon": "/icon.svg",
+    "popover": "/#popover",
+    "height": 340,
+    "width": 260
+  },
+  "icon": "/icon.svg"
+}
